@@ -1,0 +1,30 @@
+{
+  "_comment": "TENANT TEMPLATE — copy to customer.json and fill in. This is the ONLY place tenant business identity lives; the framework code reads these values (never hardcodes them). See docs/ONBOARDING.md.",
+  "customerId":   "<your-tenant-id>",
+  "customerName": "<Your Company Name>",
+  "domain":       "<your-business-domain>",
+  "jira": {
+    "issueTypes": {
+      "story":   "Story",
+      "bug":     "Bug",
+      "epic":    "Epic",
+      "task":    "Task",
+      "subtask": "Sub-task"
+    }
+  },
+  "zephyr": {
+    "folder":   "AgenticQA",
+    "statuses": { "pass": "Pass", "fail": "Fail" }
+  },
+  "testRunPrefix": "[AgenticQA]",
+  "platformDir": "../<Your>AgenticQAPlatform",
+  "playwright": {
+    "reportDir":  "logs/playwright",
+    "timeout":    300000,
+    "maxRetries": 1
+  },
+  "pipeline": {
+    "testCaseCreateLimit": 20,
+    "bugCreateLimit":      10
+  }
+}

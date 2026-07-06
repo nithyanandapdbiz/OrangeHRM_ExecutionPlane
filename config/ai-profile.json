@@ -1,0 +1,27 @@
+{
+  "version": "v1",
+  "_comment": "Tenant-owned AI selection (Model B). The Execution Plane OWNS this: which provider/model/prompts/knowledge to use. It contains NO raw secrets — credentials are REFERENCES resolved by the Intelligence Plane against the tenant's vault. The EP performs no inference; it ships this in the ExecutionContext and the shared IP runtime executes with it.",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5-20250929",
+  "fallbackModel": "claude-3-5-haiku-latest",
+  "parameters": {
+    "maxTokens": 4096,
+    "temperature": 0.2,
+    "topP": 1
+  },
+  "credentialRef": "kv://orangehrm/ai/anthropic-prod",
+  "promptPack": {
+    "ref": "orangehrm-hr",
+    "version": "1.0.0"
+  },
+  "knowledgeRefs": [
+    "kv://orangehrm/knowledge/hr-policies"
+  ],
+  "routing": {
+    "strategy": "primary-then-fallback"
+  },
+  "guardrails": {
+    "pii": "strict",
+    "maxCostUsdPerRun": 5
+  }
+}

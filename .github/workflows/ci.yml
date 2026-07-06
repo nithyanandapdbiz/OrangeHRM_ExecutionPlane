@@ -1,0 +1,45 @@
+# ── GitHub Actions CI — Execution Plane quality gate ─────────────────────────
+# Runs on every push to main and every PR targeting main. Establishes the
+# enterprise quality gate: dependencies install + unit tests + lint must pass.
+# Lint is scoped to the maintained surface and is blocking; the full-sweep lint
+# (legacy scripts) is advisory (see docs/TECH-DEBT.md TD-07).
+#
+# Recommended: protect `main` with a branch rule requiring this workflow to
+# succeed before merge (Settings → Branches → Branch protection rules).
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  quality-gate:
+    name: Quality gate (test + lint)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Unit tests (BLOCKING quality gate)
+        run: npm test
+
+      - name: Lint maintained surface (BLOCKING quality gate)
+        run: npm run lint
+
+      - name: Lint full sweep (advisory)
+        run: npm run lint:all || echo "::warning::Full-sweep lint findings (legacy scripts) — advisory, see docs/TECH-DEBT.md TD-07"

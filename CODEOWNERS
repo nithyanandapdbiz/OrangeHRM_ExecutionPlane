@@ -1,0 +1,19 @@
+# Code ownership (advisory)
+#
+# GitHub honours this file natively. Configure branch protection on `main` to
+# require review from these owners before merge.
+#
+# Replace the placeholder team handles with real DBiz Product Engineering groups.
+
+# Default owner for everything
+*                       @dbiz-product-engineering/platform
+
+# Critical cross-cutting concerns require focused review
+/routes/                @dbiz-product-engineering/platform
+/clients/               @dbiz-product-engineering/platform
+/middleware/            @dbiz-product-engineering/security
+/docs/adr/              @dbiz-product-engineering/architecture
+/.github/workflows/     @dbiz-product-engineering/devops
+/Dockerfile             @dbiz-product-engineering/devops
+/.dockerignore          @dbiz-product-engineering/security
+/.gitignore             @dbiz-product-engineering/security

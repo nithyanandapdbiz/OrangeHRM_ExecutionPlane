@@ -1,0 +1,142 @@
+name: Dev-Change QA
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/pages/**'
+      - 'api/**'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/pages/**'
+      - 'api/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dev-change-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --omit=optional
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Pre-flight
+        run: node scripts/pre-flight.js
+        continue-on-error: true
+
+      - name: Determine base SHA
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$(git rev-parse HEAD~1)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # TODO(scripts-migration): scripts/run-dev-change-pipeline.js is provided by
+      # the scripts/ migration. Until it lands this step is expected to no-op.
+      - name: Run Dev-Change reconciliation
+        id: devchange
+        run: |
+          set +e
+          node scripts/run-dev-change-pipeline.js \
+            --base=${{ steps.base.outputs.sha }} \
+            --head=${{ github.sha }} \
+            --headless
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Treat 2 (review-required) as a non-failing outcome for CI gating;
+          # the PR comment job will surface the companion cycle.
+          if [ "$code" = "0" ] || [ "$code" = "2" ]; then
+            exit 0
+          else
+            exit "$code"
+          fi
+        env:
+          # SOVEREIGN SPLIT: the Execution Plane holds NO raw AI credential. It
+          # passes only an opaque credential REFERENCE resolved by the DBiz
+          # Intelligence Plane. Never inject a raw ANTHROPIC_API_KEY here.
+          AI_CREDENTIAL_REF: ${{ vars.AI_CREDENTIAL_REF || 'kv://orangehrm/ai/anthropic-prod' }}
+          INTELLIGENCE_API_URL: ${{ secrets.INTELLIGENCE_API_URL }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY || 'OHRM' }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          DEV_CHANGE_ENABLED: 'true'
+          DOMAIN_MODE: ${{ vars.DOMAIN_MODE || 'generic' }}
+
+      - name: Upload dev-change artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-change-reports
+          path: |
+            logs/dev-change/
+            custom-report/dev-change/
+            heal-artifacts/
+          if-no-files-found: ignore
+
+      - name: PR comment with cycle summary
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = path.join(process.env.GITHUB_WORKSPACE, 'logs', 'dev-change');
+            if (!fs.existsSync(dir)) return;
+            const sha7 = '${{ github.sha }}'.slice(0, 7);
+            const file = path.join(dir, `${sha7}-report.json`);
+            if (!fs.existsSync(file)) return;
+            const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const ci = data.changeIntelligence || {};
+            const td = data.testDiscovery || {};
+            const ta = data.testAuthoring || {};
+            const tc = (data.testCycleCurator && data.testCycleCurator.cycle) || {};
+            const groups = (tc.executionGroups || []).map(g => `- **${g.name}**: ${(g.testCaseKeys||[]).length} tests`).join('\n') || '_(none)_';
+            const body = [
+              `### Dev-Change Reconciliation — \`${sha7}\``,
+              ``,
+              `| Metric | Value |`,
+              `|---|---|`,
+              `| Changes detected | ${(ci.changes||[]).length} |`,
+              `| Overall risk | ${ci.overallRisk||'n/a'} |`,
+              `| Coverage matches | ${(td.changeMatches||[]).length} |`,
+              `| Artifacts authored | ${(ta.artifacts||[]).length} |`,
+              `| Quarantined | ${(data.quarantine||[]).length} |`,
+              `| Main cycle | \`${data.mainCycle?.key||'(none)'}\` |`,
+              `| Companion cycle | \`${data.companionCycle?.key||'(none)'}\` |`,
+              ``,
+              `**Execution groups:**`,
+              groups,
+              ``,
+              `Exit code: \`${{ steps.devchange.outputs.exit_code }}\` (0=ok, 2=review-required)`
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });

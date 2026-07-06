@@ -1,0 +1,28 @@
+{
+  "customerId":   "orangehrm",
+  "customerName": "OrangeHRM",
+  "domain":       "hr",
+  "jira": {
+    "issueTypes": {
+      "story":   "Story",
+      "bug":     "Bug",
+      "epic":    "Epic",
+      "task":    "Task",
+      "subtask": "Sub-task"
+    }
+  },
+  "zephyr": {
+    "folder":   "AgenticQA",
+    "statuses": { "pass": "Pass", "fail": "Fail" }
+  },
+  "testRunPrefix": "[AgenticQA]",
+  "playwright": {
+    "reportDir":  "logs/playwright",
+    "timeout":    300000,
+    "maxRetries": 1
+  },
+  "pipeline": {
+    "testCaseCreateLimit": 20,
+    "bugCreateLimit":      10
+  }
+}

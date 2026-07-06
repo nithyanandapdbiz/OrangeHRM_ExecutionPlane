@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "evidence-index",
+  "title": "Evidence Index",
+  "type": "object",
+  "properties": {
+    "indexedAt":   { "type": "string", "format": "date-time" },
+    "totalItems":  { "type": "integer" },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "byType":     { "type": "object" },
+        "byStatus":   { "type": "object" },
+        "totalSizeKb":    { "type": "number" },
+        "embeddedCount":  { "type": "integer" },
+        "externalCount":  { "type": "integer" }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "scenarioName"],
+        "properties": {
+          "id":           { "type": "string" },
+          "type":         { "type": "string", "enum": ["SCREENSHOT", "VIDEO", "CONSOLE_LOG", "NETWORK_TRACE", "API_LOG"] },
+          "scenarioName": { "type": "string" },
+          "issueKey":       { "type": ["string", "null"] },
+          "label":        { "type": "string" },
+          "status":       { "type": "string" },
+          "dataPresent":  { "type": "boolean" },
+          "estimatedSizeKb": { "type": "number" },
+          "storageHint":  { "type": "string", "enum": ["EMBEDDED", "FILE_PATH", "EXTERNAL"] },
+          "retention": {
+            "type": "object",
+            "properties": {
+              "policy":           { "type": "string" },
+              "archiveAfterDays": { "type": "integer" },
+              "deleteAfterDays":  { "type": "integer" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

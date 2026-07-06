@@ -1,0 +1,14 @@
+Execution Plane "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+1. Confirm the secret exists (the chart references it, never creates it):
+     kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }}
+   Required keys: CLIENT_ID, CLIENT_SECRET, JIRA_API_TOKEN, JIRA_EMAIL, ZEPHYR_API_TOKEN, APP_USERNAME, APP_PASSWORD, API_SECRET.
+   It MUST NOT contain any AI-provider credential — the container exits at boot
+   if one is present (sovereign-split startup guard).
+
+2. Port-forward and check health:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "execution-plane.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+     curl localhost:{{ .Values.service.port }}/health
+
+REMINDER: replicaCount is pinned to 1 (TD-12). Do not scale out until the
+in-flight lock and artefact paths are externalised.

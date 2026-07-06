@@ -1,0 +1,21 @@
+# Gitleaks configuration — OrangeHRM Execution Plane.
+# Extends the default rule set (Jira/Atlassian tokens, JWTs, generic API keys,
+# private keys, etc.) and allowlists the intentional placeholders in committed
+# example/template files so they don't false-positive.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Committed placeholders and public demo values are not secrets"
+paths = [
+  '''\.env\.example''',
+]
+regexes = [
+  '''your-[a-z-]+-here''',
+  '''your-org\.atlassian\.net''',
+  '''kv://[a-z0-9/-]+''',            # credential REFERENCES, never raw keys
+  '''admin123''',                    # public OrangeHRM demo password
+  '''change-me[a-z-]*''',
+  '''<[a-z-]+>''',                   # <your-vault>, <your-tenant> placeholders
+]

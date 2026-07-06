@@ -1,0 +1,44 @@
+# ── Docker build context exclusions ──────────────────────────────────────────
+# The final image stage does `COPY . .`; without this file, secrets and local
+# artefacts would be baked into image layers. SECURITY-CRITICAL — keep current.
+
+# Secrets & local credentials — MUST never enter an image layer
+.env
+.env.*
+!.env.example
+.auth/
+*.pem
+*.key
+
+# Dependencies & build output (re-installed in dedicated stages)
+node_modules/
+/platform/
+
+# Version control & CI
+.git/
+.github/
+.gitignore
+
+# Runtime artefacts & logs (generated at run time, not build time)
+logs/
+reports/
+custom-report/
+allure-report/
+allure-results/
+test-results/
+playwright-report/
+.videos/
+.cache/
+artifacts/
+
+# Local tooling / editor
+.vscode/
+.idea/
+.claude/
+*.log
+npm-debug.log*
+
+# Docs (not needed in the runtime image)
+docs/
+*.md
+!README.md

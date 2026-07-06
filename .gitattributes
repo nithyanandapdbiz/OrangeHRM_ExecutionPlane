@@ -1,0 +1,17 @@
+# Normalise line endings — prevents CRLF/LF churn across Windows/Linux/CI runners.
+# Text files are stored as LF in the repo; checked out per-platform.
+* text=auto eol=lf
+
+# Shell scripts and the Docker entrypoint MUST be LF (they run on Linux).
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+
+# Binary assets — never normalise.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webm binary
+*.mp4  binary
+*.pdf  binary

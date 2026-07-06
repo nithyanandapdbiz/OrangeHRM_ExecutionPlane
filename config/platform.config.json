@@ -1,0 +1,61 @@
+{
+  "$schema": "../../schemas/platform-config.schema.json",
+  "platform": {
+    "name": "OrangeHRM Agentic QA Platform",
+    "version": "2.0.0",
+    "jiraSourceOfTruth": true
+  },
+  "jira": {
+    "baseUrl": "${JIRA_BASE_URL}",
+    "projectKey": "${JIRA_PROJECT_KEY}",
+    "apiVersion": "3",
+    "timeoutMs": 15000,
+    "validationMode": "OFFLINE",
+    "tagPattern": "^@?AI_SDLC-T\\d+$"
+  },
+  "zephyr": {
+    "apiUrl": "${ZEPHYR_API_URL}",
+    "projectKey": "${JIRA_PROJECT_KEY}",
+    "folder": "AgenticQA"
+  },
+  "governance": {
+    "releaseDecision": {
+      "requireTraceabilityValidation": true,
+      "orphanRateBlockThreshold": 20,
+      "orphanRateWarnThreshold": 10,
+      "traceabilityCertifiedBlockThreshold": 30,
+      "traceabilityCertifiedWarnThreshold": 60,
+      "evidenceCoverageWarnThreshold": 80
+    }
+  },
+  "evidence": {
+    "storage": "EMBEDDED",
+    "retentionDays": {
+      "screenshots": 30,
+      "videos": 7,
+      "logs": 14
+    },
+    "compressionThresholdKb": 512,
+    "maxEmbeddedSizeKb": 5120
+  },
+  "performance": {
+    "lazyLoadEvidence": true,
+    "contentVisibilityAuto": true,
+    "virtualScrollThreshold": 50,
+    "chunkSizeKb": 256
+  },
+  "warehouse": {
+    "executionsPath": "platform/warehouse/executions",
+    "jiraPath": "platform/warehouse/jira",
+    "evidencePath": "platform/warehouse/evidence",
+    "validationPath": "platform/warehouse/validation",
+    "analyticsPath": "platform/warehouse/analytics",
+    "retentionDays": 90
+  },
+  "trust": {
+    "targetTrustworthiness": 90,
+    "minimumToRelease": 70,
+    "metricsRequireCertification": true,
+    "decisionsRequireExplainability": true
+  }
+}

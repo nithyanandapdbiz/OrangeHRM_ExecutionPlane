@@ -1,0 +1,12 @@
+apiVersion: v2
+name: execution-plane
+description: OrangeHRM Execution Plane — customer-tenant QA orchestration (sovereign split)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - qa
+  - execution-plane
+  - sovereign-split
+maintainers:
+  - name: DBiz Product Engineering

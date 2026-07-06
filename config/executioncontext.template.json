@@ -1,0 +1,26 @@
+{
+  "_comment": "REFERENCE SHAPE ONLY — you do NOT fill this in. The ExecutionContext V1 is BUILT at runtime by lib/execution-context.js from config/customer.json + config/ai-profile.json + per-run business data, and shipped to the Intelligence Plane on every call. This file documents the contract a new tenant will emit. Field classification: mandatory | optional | computed | sensitive-ref | immutable | versioned.",
+  "version": "v1",
+  "metadata": {
+    "executionId": "<computed|mandatory|immutable>",
+    "correlationId": "<computed|mandatory>",
+    "timestamp": "<computed|mandatory ISO-8601>",
+    "source": "<tenant>-execution-plane"
+  },
+  "tenant": { "id": "<from customer.json|mandatory|immutable>", "name": "<from customer.json>", "domain": "<from customer.json>" },
+  "identity": { "userId": "<optional>", "roles": [] },
+  "security": { "classification": "confidential", "credentialRefs": { "ai": "kv://…  <mandatory|sensitive-ref — NEVER a raw key>" } },
+  "ai": {
+    "provider": "<from ai-profile.json|mandatory|versioned>",
+    "model": "<from ai-profile.json|mandatory|versioned>",
+    "fallbackModel": "<optional>",
+    "parameters": { "maxTokens": 4096, "temperature": 0.2, "topP": 1 },
+    "promptPack": { "ref": "<optional|versioned>", "version": "1.0.0" },
+    "knowledgeRefs": [],
+    "routing": { "strategy": "primary-then-fallback" },
+    "guardrails": { "pii": "strict", "maxCostUsdPerRun": 5 }
+  },
+  "business": { "<per-run business inputs, e.g. storyId>": "…" },
+  "connectors": { "jira": { "baseUrl": "<ref>", "projectKey": "<ref>" }, "zephyr": { "apiUrl": "<ref>" }, "app": { "baseUrl": "<ref>" } },
+  "telemetry": { "correlationId": "<computed>" }
+}

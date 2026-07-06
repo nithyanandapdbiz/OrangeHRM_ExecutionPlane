@@ -1,0 +1,27 @@
+{
+  "version": "v1",
+  "_comment": "TENANT-OWNED AI SELECTION TEMPLATE (Model B). Copy to ai-profile.json and choose your provider/model/prompts. Credentials are REFERENCES (kv://…) resolved by the Intelligence Plane — never raw keys. The EP ships this in the ExecutionContext; no framework code changes to switch provider/model. See docs/ONBOARDING.md.",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5-20250929",
+  "fallbackModel": "<your-fallback-model-id>",
+  "parameters": {
+    "maxTokens": 4096,
+    "temperature": 0.2,
+    "topP": 1
+  },
+  "credentialRef": "kv://<your-vault>/<your-tenant>/ai-provider",
+  "promptPack": {
+    "ref": "<your-prompt-pack-id>",
+    "version": "1.0.0"
+  },
+  "knowledgeRefs": [
+    "kv://<your-vault>/<your-tenant>/knowledge/<your-knowledge-base>"
+  ],
+  "routing": {
+    "strategy": "primary-then-fallback"
+  },
+  "guardrails": {
+    "pii": "strict",
+    "maxCostUsdPerRun": 5
+  }
+}

@@ -1,0 +1,62 @@
+# ── Execution Plane Helm values ──────────────────────────────────────────────
+# Customer-hosted, single-tenant deployment (one release per customer tenant).
+
+# IMPORTANT: replicaCount MUST stay 1 until TD-12 is resolved (process-global
+# in-flight lock + fixed artefact paths are not multi-replica safe). Scaling out
+# now would corrupt shared run state. See docs/TECH-DEBT.md.
+replicaCount: 1
+
+image:
+  repository: <your-registry>/orangehrm-execution-plane
+  tag: "1.0.0"          # pin to an immutable digest in production
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+# Non-secret configuration → ConfigMap (validated by `npm run config:check`).
+config:
+  INTELLIGENCE_API_URL: "http://intelligence-plane:3001"
+  INTELLIGENCE_API_VERSION: "v1"
+  JIRA_BASE_URL: "https://your-org.atlassian.net"
+  JIRA_PROJECT_KEY: "OHRM"
+  ZEPHYR_API_URL: "https://api.zephyrscale.smartbear.com/v2"
+  APP_BASE_URL: "https://opensource-demo.orangehrmlive.com"
+  PLATFORM_DIR: "/platform"
+  SECRETS_PROVIDER: "keyvault"   # cluster sources secrets from Key Vault
+  PW_HEADLESS: "true"   # headless in cluster; headed only for local QA
+  RUN_PERF: "true"
+  RUN_SECURITY: "true"
+  # NOTE: no AI provider/model/prompt config here — the EP is provider-agnostic.
+
+# Secrets are referenced from an EXISTING Kubernetes Secret — never templated
+# with literal values. Create it from Key Vault (CSI driver / External Secrets).
+# Required keys: CLIENT_ID, CLIENT_SECRET, JIRA_API_TOKEN, JIRA_EMAIL, ZEPHYR_API_TOKEN,
+#                APP_USERNAME, APP_PASSWORD, API_SECRET
+existingSecret: "execution-plane-secrets"
+
+# Pod hardening (TD-10). The IMAGE must support non-root before enabling
+# runAsNonRoot (relocate the Playwright browser cache off /root/.cache first).
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # true once writable paths are mounted as volumes
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  requests: { cpu: "250m", memory: "512Mi" }
+  limits:   { cpu: "1",    memory: "2Gi" }
+
+probes:
+  liveness:  { path: /health, initialDelaySeconds: 20, periodSeconds: 30 }
+  readiness: { path: /health, initialDelaySeconds: 10, periodSeconds: 10 }
+
+# Default-deny egress is recommended; allow only Jira, Zephyr, the AI plane, and
+# the app under test.
+networkPolicy:
+  enabled: false

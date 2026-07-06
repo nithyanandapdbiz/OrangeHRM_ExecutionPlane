@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "alm-validation",
+  "title": "ALM Validation Report",
+  "type": "object",
+  "required": ["validatedAt", "validationMode", "governanceStatus", "summary"],
+  "properties": {
+    "validatedAt": { "type": "string", "format": "date-time" },
+    "validationMode": { "type": "string", "enum": ["ONLINE", "OFFLINE"] },
+    "governanceStatus": { "type": "string", "enum": ["PASS", "WARN", "FAIL"] },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "totalScenarios":      { "type": "integer" },
+        "withTag":             { "type": "integer" },
+        "orphanScenarios":     { "type": "integer" },
+        "validTestCases":      { "type": "integer" },
+        "invalidTestCases":    { "type": "integer" },
+        "missingFromSuite":    { "type": "integer" },
+        "validationCoverage":  { "type": "number" },
+        "brokenLinks":         { "type": "integer" }
+      }
+    },
+    "details": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "scenarioName":  { "type": "string" },
+          "issueKey":      { "type": ["string", "null"] },
+          "testCaseKey":   { "type": ["string", "null"] },
+          "status":        { "type": "string", "enum": ["VALID", "ORPHAN", "INVALID_FORMAT", "NOT_IN_SUITE", "VERIFIED_LIVE"] },
+          "issues":        { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

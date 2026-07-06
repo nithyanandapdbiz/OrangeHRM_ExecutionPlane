@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "validation-history",
+  "title": "Validation History",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["runId", "timestamp", "releaseDecision", "passRate"],
+    "properties": {
+      "runId":              { "type": "string" },
+      "timestamp":          { "type": "string" },
+      "releaseDecision":    { "type": "string", "enum": ["GO", "CONDITIONAL GO", "NO GO"] },
+      "qualityGateScore":   { "type": "number" },
+      "passRate":           { "type": "number" },
+      "predictedNextPassRate": { "type": ["number", "null"] },
+      "actualNextPassRate":    { "type": ["number", "null"] },
+      "predictionError":       { "type": ["number", "null"] },
+      "accuracyPoint":         { "type": ["boolean", "null"] },
+      "almValidationStatus":   { "type": ["string", "null"] },
+      "traceabilityCertRate":  { "type": ["number", "null"] }
+    }
+  }
+}

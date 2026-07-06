@@ -1,0 +1,73 @@
+name: Dev-Change Pattern Mining
+
+# Nightly cron mines patterns from accumulated outcomes.jsonl into
+# patterns.json. Default min-outcomes is 50 — runs early in adoption will
+# silently emit `insufficient_outcomes` and exit 0. Default OFF feel: this
+# job only updates the patterns artefact; agents only consume it when
+# AI_ENRICH_DEV_CHANGE_LEARNING is set in the consumer environment.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # 03:17 UTC daily
+  workflow_dispatch:
+    inputs:
+      min_outcomes:
+        description: 'Minimum outcome rows required'
+        required: false
+        default: '50'
+      min_confidence:
+        description: 'Minimum pattern confidence (0..1)'
+        required: false
+        default: '0.7'
+
+jobs:
+  mine-patterns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Restore prior outcomes (best-effort)
+        uses: actions/cache@v4
+        with:
+          path: logs/dev-change/outcomes.jsonl
+          key: dev-change-outcomes-${{ github.ref }}
+          restore-keys: |
+            dev-change-outcomes-
+
+      # TODO(scripts-migration): scripts/mine-dev-change-patterns.js is provided
+      # by the scripts/ migration — this step no-ops until that script lands.
+      - name: Mine patterns
+        env:
+          DEV_CHANGE_PATTERN_MIN_CONFIDENCE: ${{ github.event.inputs.min_confidence || '0.7' }}
+        run: |
+          node scripts/mine-dev-change-patterns.js \
+            --min-outcomes=${{ github.event.inputs.min_outcomes || '50' }} \
+            --print
+
+      - name: Upload patterns artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-change-patterns
+          path: |
+            logs/dev-change/patterns.json
+            logs/dev-change/outcomes.jsonl
+          if-no-files-found: ignore
+          retention-days: 30

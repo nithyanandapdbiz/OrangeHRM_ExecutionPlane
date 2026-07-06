@@ -1,0 +1,311 @@
+﻿name: QA Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:           # allow manual trigger from GitHub UI
+  schedule:
+    - cron: '0 2 * * *'        # nightly artifact cleanup (2am UTC)
+
+permissions:
+  contents: write              # required to push commits back to the repo
+
+jobs:
+  artifact-cleanup:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --omit=optional || npm install --no-audit --no-fund
+      - run: npm run cleanup:artifacts
+        env:
+          ARTIFACT_RETENTION_DAYS: '30'
+      - name: Upload cleanup report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-report
+          path: logs/cleanup-report.json
+          if-no-files-found: ignore
+
+  qa:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout full history so git push works correctly ──────────────
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Setup Node.js ──────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── 3. Install dependencies ───────────────────────────────────────────
+      - name: Install dependencies
+        run: npm install
+
+      # ── 4. Install Playwright browsers ───────────────────────────────────
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # ── 4b. Install k6 ───────────────────────────────────────────────────
+      - name: Install k6
+        run: |
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update && sudo apt-get install k6
+      # ── 4c. Start OWASP ZAP ──────────────────────────────────────────────────────
+      - name: Start OWASP ZAP
+        run: |
+          docker pull zaproxy/zap-stable
+          docker run -d --name zap -p 8080:8080 zaproxy/zap-stable \
+            zap.sh -daemon -host 0.0.0.0 -port 8080 \
+            -config api.key=${{ secrets.ZAP_API_KEY }}
+          sleep 15
+      # ── 4d. Domain purity CI gate (WI-035A) ───────────────────────────────
+      #        Retargeted: assert no legacy pre-migration vendor / issue-tracker /
+      #        target-app references remain in the repository.
+      - name: Domain purity CI gate
+        run: npm run domain:ci-gate
+        env:
+          DOMAIN_PURITY_ENFORCED: 'true'
+
+      # ── 4e. Legacy-reference eradication gate (WI-035C) ───────────────────
+      #        Fails the build if any legacy pre-migration reference is found.
+      #        TODO(scripts-migration): scripts/domain-eradication-audit.js is
+      #        provided by the scripts/ migration — this step is a no-op until
+      #        that script lands.
+      - name: Legacy-reference eradication check
+        id: legacy-eradication
+        run: node scripts/domain-eradication-audit.js --json --out reports/legacy-eradication-report.json
+        continue-on-error: false
+
+      # ── 4f. BDD healer compliance gate (WI-035C) ──────────────────────────
+      - name: BDD healer compliance check
+        run: npm run healer:compliance-check
+
+      # ── 4h. Executability feasibility gate (WI-037) ───────────────────────
+      - name: Pre-execution feasibility check
+        id: feasibility
+        run: npm run feasibility:check
+        continue-on-error: false
+        env:
+          APP_BASE_URL:          ${{ secrets.APP_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          APP_USERNAME:          ${{ secrets.APP_USERNAME || 'Admin' }}
+          APP_PASSWORD:          ${{ secrets.APP_PASSWORD }}
+          JIRA_API_TOKEN:        ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_EMAIL:            ${{ secrets.JIRA_EMAIL }}
+          JIRA_BASE_URL:         ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY:      ${{ secrets.JIRA_PROJECT_KEY }}
+          ZEPHYR_API_TOKEN:      ${{ secrets.ZEPHYR_API_TOKEN }}
+
+      # ── 5a. Pre-flight: fail fast on credential / tool issues ────────────
+      - name: Pre-flight checks
+        run: node scripts/pre-flight.js --include-perf --include-security
+        env:
+          ISSUE_KEY:          ${{ secrets.ISSUE_KEY || 'OHRM-1' }}
+          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY:   ${{ secrets.JIRA_PROJECT_KEY || 'OHRM' }}
+          JIRA_EMAIL:         ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN:     ${{ secrets.JIRA_API_TOKEN }}
+          ZEPHYR_API_TOKEN:   ${{ secrets.ZEPHYR_API_TOKEN }}
+          APP_BASE_URL:        ${{ secrets.APP_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          APP_USERNAME:        ${{ secrets.APP_USERNAME || 'Admin' }}
+          APP_PASSWORD:        ${{ secrets.APP_PASSWORD }}
+
+      # ── 5. Run full QA pipeline (fail-fast on critical errors) ───────────
+      #       continue-on-error removed: pipeline failures now correctly fail
+      #       the workflow so downstream owners see red badges. Artifacts still
+      #       upload via `if: always()` on each upload step.
+      - name: Run full QA pipeline
+        run: node scripts/run-full-pipeline.js --use-runner --include-perf --include-security --headless
+        env:
+          ISSUE_KEY:          ${{ secrets.ISSUE_KEY || 'OHRM-1' }}
+          PROJECT_KEY:        ${{ secrets.JIRA_PROJECT_KEY || 'OHRM' }}
+          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY:   ${{ secrets.JIRA_PROJECT_KEY || 'OHRM' }}
+          JIRA_EMAIL:         ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN:     ${{ secrets.JIRA_API_TOKEN }}
+          ZEPHYR_API_URL:     ${{ secrets.ZEPHYR_API_URL || 'https://api.zephyrscale.smartbear.com/v2' }}
+          ZEPHYR_API_TOKEN:   ${{ secrets.ZEPHYR_API_TOKEN }}
+          APPLITOOLS_API_KEY:    ${{ secrets.APPLITOOLS_API_KEY }}
+          USE_ULTRAFAST_GRID:    'true'
+          APPLITOOLS_CONCURRENCY: '5'
+          APPLITOOLS_BATCH_ID:   ${{ github.run_id }}
+          PW_HEADLESS:           'true'
+          PERF_SKIP_SOAK:        'true'
+          PERF_VUS_MAX:          '10'
+          ZAP_API_URL:           'http://localhost:8080'
+          ZAP_API_KEY:           ${{ secrets.ZAP_API_KEY }}
+          ZAP_DOCKER:            'false'
+          ZAP_SCAN_TYPE:         'baseline'
+          ZAP_FAIL_ON:           'high'
+          APP_BASE_URL:          ${{ secrets.APP_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          APP_USERNAME:          ${{ secrets.APP_USERNAME || 'Admin' }}
+          APP_PASSWORD:          ${{ secrets.APP_PASSWORD }}
+
+      # ── 5b. Governance Gate (WI-046B) ────────────────────────────────────────
+      - name: Governance gate (WI-046B)
+        if: always()
+        continue-on-error: true
+        run: node scripts/governance-gate.js
+        env:
+          ISSUE_KEY:        ${{ secrets.ISSUE_KEY || 'OHRM-1' }}
+          JIRA_BASE_URL:    ${{ secrets.JIRA_BASE_URL }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY || 'OHRM' }}
+          JIRA_EMAIL:       ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN:   ${{ secrets.JIRA_API_TOKEN }}
+
+      # ── 5c. Upload pipeline failure report (only if runner halted) ────────
+      - name: Upload pipeline failure report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-failure-report
+          path: logs/pipeline-failure-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── 5d. Upload legacy-reference eradication report ─────────────────────
+      - name: Upload eradication report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-eradication-report
+          path: reports/legacy-eradication-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── 6. Upload Playwright HTML report as artifact ──────────────────────
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      # ── 7. Upload custom QA report as artifact ────────────────────────────
+      - name: Upload custom QA report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-qa-report
+          path: custom-report/
+          retention-days: 30
+      # ── 7b. Upload security test results as artifact ──────────────────────────────────────────────────────
+      - name: Upload security test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: test-results/security/
+          retention-days: 30
+      # ── 7c. Upload performance HTML report as artifact ────────────────────────────────────────────
+      - name: Upload perf report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report
+          path: custom-report/perf/
+          retention-days: 30
+
+      # ── 7d. Upload security HTML report as artifact ──────────────────────────────────────────────
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: custom-report/security/
+          retention-days: 30
+
+      # ── 7e. Upload governance reports (WI-046A/B/C) ──────────────────────
+      - name: Upload governance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-reports
+          path: |
+            reports/coding-standards-compliance.json
+            reports/governance-scorecard.json
+            reports/governance-enforcement.json
+            reports/governance-remediation-plan.json
+            reports/governance-burndown.json
+            reports/governance-priority-matrix.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── 8. Upload Allure results as artifact ─────────────────────────────
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results/
+          retention-days: 30
+
+      # ── 9. Upload Allure HTML report as artifact ──────────────────────────
+      - name: Upload Allure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report/
+          retention-days: 30
+
+      # ── 10. Commit generated artifacts back to main ───────────────────────
+      #        [skip ci] prevents this commit from re-triggering the workflow.
+      - name: Commit and push QA artifacts to qa-artifacts
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage generated artifacts (ignore files not present)
+          git add -f test-results.json           2>/dev/null || true
+          git add -f test-results/               2>/dev/null || true
+          git add -f custom-report/              2>/dev/null || true
+          git add -f playwright-report/          2>/dev/null || true
+          git add -f allure-results/             2>/dev/null || true
+          git add -f allure-report/              2>/dev/null || true
+          git add -f .story-testcases.json       2>/dev/null || true
+          git add -f generation-manifest.json    2>/dev/null || true
+          git add -f reports/coding-standards-compliance.json 2>/dev/null || true
+          git add -f reports/governance-scorecard.json        2>/dev/null || true
+          git add -f reports/governance-enforcement.json      2>/dev/null || true
+          git add -f reports/governance-remediation-plan.json 2>/dev/null || true
+          git add -f reports/governance-burndown.json         2>/dev/null || true
+          git add -f reports/governance-priority-matrix.json  2>/dev/null || true
+          git add -f tests/features/             2>/dev/null || true
+          git add -f tests/pages/                2>/dev/null || true
+          git add -f tests/locators/             2>/dev/null || true
+          git add -f tests/step-definitions/     2>/dev/null || true
+
+          # Only commit + push if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit — skipping push."
+          else
+            git commit -m "ci: update QA artifacts [skip ci]"
+            git push origin HEAD:qa-artifacts
+          fi
+
+      # ── Stop ZAP teardown ──────────────────────────────────────────────────────────────────────────────────────
+      - name: Stop OWASP ZAP
+        if: always()
+        run: docker stop zap || true
