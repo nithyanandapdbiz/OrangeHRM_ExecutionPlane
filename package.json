@@ -17,7 +17,7 @@
     "auth:validate": "node -e \"require('dotenv').config();require('./tests/auth/authManager').ensureAuthenticated().then(t=>process.exit(t.authenticated?0:4)).catch(()=>process.exit(4))\"",
     "logs": "node scripts/tail-logs.js",
     "config:check": "node scripts/config-check.js",
-    "test": "node --test \"test/**/*.test.js\"",
+    "test": "node --test test/*.test.js",
     "lint": "eslint server.js routes clients runners lib middleware test --ext .js",
     "lint:all": "eslint . --ext .js",
     "lint:fix": "eslint server.js routes clients runners lib middleware test --ext .js --fix",
