@@ -30,3 +30,11 @@ artifacts/
 Thumbs.db
 *.swp
 npm-debug.log*
+
+# Discovery runtime byproducts (generated per run)
+tests/discovery/state/
+tests/discovery/generated-pages/
+tests/discovery/generated-contracts/
+
+# Discovery CLI local config (may contain creds)
+.discoveryrc.json
