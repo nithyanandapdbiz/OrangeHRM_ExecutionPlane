@@ -6,6 +6,68 @@ date-based entries until a formal semantic-version release cadence is adopted.
 
 ## [Unreleased]
 
+### Discovery Phase 4.1 — production hardening (certification findings F1–F4) — 2026-07-13
+- **F1** browser resource leak → `appCrawler.crawl` wrapped in `try/finally`; Chromium closes
+  on every exit path (original exception preserved).
+- **F2** run-store memory growth → bounded retention (TTL 24 h + max 100 completed / 50 failed)
+  with eviction + `metrics()` in both run stores; active runs never evicted (env-tunable).
+- **F3** checkpoint race → unique temp filename per write + rename retry/fallback in
+  `discovery.state` (both planes); **0 ENOENT** live; content unchanged (determinism preserved).
+- **F4** artifact filename validation → CLI `isSafeArtifactPath` rejects traversal/absolute/
+  drive-letter/control-char names and keeps writes inside the run dir.
+- Additive only — no API/contract/artefact changes. Tests: EP 138/138, IP 979/0-fail (12 new).
+  Certification: **CERTIFIED FOR ENTERPRISE PRODUCTION DEPLOYMENT** — see docs/PRODUCTION-HARDENING-REPORT.md.
+
+### Discovery Phase 3 — autonomous application intelligence — 2026-07-12
+- **Added** (Intelligence Plane, additive — no EP changes): business-rule discovery,
+  test-coverage intelligence (+ heat map + confidence), a scored risk engine, autonomous
+  test recommendations, a knowledge-graph query engine, enterprise reports
+  (executive/architect/QA/developer), and a versioned AI-readiness contract for 8
+  downstream agents (`src/orchestrators/discoveryIntelligence.js`).
+- **Added** incremental/differential discovery: `discoveryDelta`, `graphDiff`,
+  `changeImpact` (`src/orchestrators/discoveryDelta.js`), exposed via
+  `POST /api/discovery/delta` and `POST /api/discovery/:id/query`.
+- Synthesis now returns `artifacts.intelligence` and aggregates accessibility into the app model.
+- **Verified live** on OrangeHRM: 90% coverage, risk medium(68), 42 recommendations,
+  delta pagesAdded 4 / graph nodesAdded 55, graph queries. Tests: IP 974/0-fail, discovery 26/26. ADR-0015.
+
+### Discovery Phase 2 — deep DOM + modelling + analytics — 2026-07-12
+- **Added** (EP crawler, additive): Shadow-DOM piercing (nested open roots), same-origin
+  iFrame traversal, dynamic-content auto-scroll (lazy/infinite/virtualised), accessibility
+  discovery (landmarks + missing-label audit), and discovery analytics with an FNV-1a
+  content fingerprint for incremental/differential discovery.
+- **Added** (IP, additive): business workflow-journey inference + a typed application
+  knowledge graph (`src/orchestrators/discoveryModeler.js`), returned as new artefacts.
+- **Verified live** on OrangeHRM: components 549→**756** (scroll), **38 a11y landmarks /
+  303 missing labels**, **9 workflows**, knowledge graph **153 nodes / 171 edges**.
+- Additive only — `crawl()` API + all existing artefacts unchanged. Tests: EP 122/122,
+  IP discovery 16/16. See ADR-0014.
+
+### Discovery crawl enhancement (SPA-aware, enterprise) — 2026-07-12
+- **Fixed** a silent auth skip (login used non-waiting `isVisible()`); the crawler now
+  waits for + verifies authentication, so it crawls the authenticated app.
+- **Added** SPA menu harvesting, multi-level BFS/DFS traversal, URL normalisation +
+  cycle detection, advanced component discovery (14 classifiers + ARIA/stability), and a
+  navigation graph. IP synthesis carries components + nav graph (additive).
+- **Verified live** on OrangeHRM (`maxDepth:1`): routes 1→**12**, components 0→**549**,
+  endpoints 2→**56**; IP produced 21 POMs / 31 contracts / 4 contract tests.
+- Additive only — `crawl()` API unchanged. Tests: EP 122/122; see ADR-0013.
+
+### Discovery (Sovereign-Split integration) — 2026-07-12
+- **Added** an end-to-end Discovery capability that preserves the Sovereign Split.
+  The Execution Plane performs the deterministic browser crawl + DOM/network/form
+  capture + PII scrubbing (`src/discovery/appCrawler.js`), then delegates all AI
+  synthesis to the Intelligence Plane over OAuth2.
+- **Added** intelligence-client methods: `discover`, `getDiscoveryStatus`,
+  `downloadArtifacts`, `cancelDiscovery`, `retryDiscovery` (+ `_get`).
+- **Added** async execution store (`src/discovery/discoveryExecutionStore.js`) and
+  EP routes `POST /discovery/run`, `GET /discovery/runs/:id[/artifacts]`,
+  `POST /discovery/cancel/:id`.
+- **Changed** `discovery.controller.js` to run the crawl→scrub→delegate→poll→download
+  worker instead of spawning a non-existent local CLI.
+- **Docs:** ADR-0012, OpenAPI (`docs/discovery-openapi.yaml`), validation report.
+- No AI logic runs in the Execution Plane. Tests: 115/115 (node:test).
+
 ### Platform
 - **OrangeHRM tenant.** Package identity, configuration, and docs are OrangeHRM-native
   (`customerId: orangehrm`, `domain: human-resources`, `PLATFORM_DIR=../OrangeHRM_AgenticQAPlatform`).

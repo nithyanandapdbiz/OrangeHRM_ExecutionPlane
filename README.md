@@ -128,6 +128,7 @@ raw execution detail `┊`) and ends with a summary banner. `npm run logs` tails
 |---|---|
 | `npm start` / `npm run dev` | run the server (`dev` = watch mode) |
 | `npm run e2e` / `npm run pipeline` | trigger a pipeline run (live trace) |
+| `npm run discover` | **Enterprise Discovery CLI** — crawl → synthesise → download artefacts (see §8b) |
 | `npm run logs` | tail the structured execution log |
 | `npm run health` | print `/health` JSON (Jira/Zephyr/IP/Playwright readiness) |
 | `npm run auth:validate` | validate the OrangeHRM app session |
@@ -143,6 +144,66 @@ raw execution detail `┊`) and ends with a summary banner. `npm run logs` tails
 
 > **CI:** GitHub Actions (`.github/workflows/ci.yml`) runs `npm ci` + `npm test` + `npm run lint` on every
 > push/PR to `main`. Require the check on `main` (branch protection) to enforce the gate before merge.
+
+## 8b. Discovery CLI
+
+A thin developer-experience wrapper (`scripts/discover.js`) over the existing Discovery
+REST APIs — it orchestrates the Execution Plane (crawl + status + artefacts) and the
+Intelligence Plane (delta + graph query). It adds **no** discovery logic. Both planes must
+be running (IP `:3001`, EP `:3002`).
+
+```bash
+# Simplest — uses .discoveryrc.json / env vars
+npm run discover
+
+# Explicit options
+npm run discover -- --url=https://opensource-demo.orangehrmlive.com \
+  --username=Admin --password=admin123 --depth=5 --pages=200 --strategy=bfs
+
+# Lifecycle
+npm run discover -- --resume                 # re-check / re-download the last run
+npm run discover -- --delta                  # compare the two most recent runs
+npm run discover -- --query modules
+npm run discover -- --query pagesWithComponent --type datepicker
+npm run discover -- --query workflowsUsingField --field employeeId
+npm run discover -- --report executive       # executive | architect | qa | developer
+npm run discover -- --ci                     # machine-readable JSON, no colour, exit codes
+npm run discover -- --help
+```
+
+**What it does:** pre-flight health checks (EP, IP, OAuth2, tenant, config) → `POST
+/discovery/run` → polls with staged progress (`queued → crawling → scrubbing →
+synthesising → downloading → completed`) → downloads and splits artefacts into
+`artifacts/discovery/<runId>/` (application model, navigation + knowledge graphs, business
+rules, coverage, risk, recommendations, POMs, contracts, contract tests, HTML report) →
+prints a summary. Transient failures are retried; everything is logged to
+`logs/discovery-cli.log`.
+
+**Configuration precedence:** CLI args **>** env vars **>** `.discoveryrc.json` **>** defaults.
+
+```jsonc
+// .discoveryrc.json  (copy from .discoveryrc.example.json; git-ignored — may hold creds)
+{ "baseUrl": "https://opensource-demo.orangehrmlive.com", "username": "Admin",
+  "password": "admin123", "maxDepth": 5, "maxPages": 200, "strategy": "bfs", "domain": "hr" }
+```
+
+Env vars: `DISCOVERY_URL`, `DISCOVERY_USERNAME`, `DISCOVERY_PASSWORD`, `DISCOVERY_DEPTH`,
+`DISCOVERY_PAGES`, `DISCOVERY_STRATEGY` (OAuth2 uses `CLIENT_ID`/`CLIENT_SECRET` from `.env`).
+
+**CI/CD** — machine-readable, proper exit codes (`0` success, non-zero on failure):
+
+```yaml
+- name: Application Discovery
+  env:
+    DISCOVERY_URL: ${{ vars.APP_URL }}
+    DISCOVERY_USERNAME: ${{ secrets.APP_USER }}
+    DISCOVERY_PASSWORD: ${{ secrets.APP_PASS }}
+    CLIENT_ID: ${{ secrets.CLIENT_ID }}
+    CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+  run: npm run discover -- --ci --pages 200 > discovery.json
+- uses: actions/upload-artifact@v4
+  with: { name: discovery-artifacts, path: artifacts/discovery/ }
+```
 
 ## 9. Containerisation
 

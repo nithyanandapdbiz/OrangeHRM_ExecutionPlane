@@ -1,0 +1,207 @@
+openapi: 3.0.3
+info:
+  title: Sovereign-Split Discovery API
+  version: 1.0.0
+  description: >
+    Two cooperating surfaces. The Execution Plane (EP) exposes an operator-facing
+    discovery API and performs the browser crawl; the Intelligence Plane (IP)
+    exposes the AI synthesis API. The EP delegates synthesis to the IP over OAuth2.
+
+servers:
+  - url: http://localhost:3002
+    description: Execution Plane (tenant-owned)
+  - url: http://localhost:3001
+    description: Intelligence Plane (DBiz)
+
+tags:
+  - name: Execution Plane
+  - name: Intelligence Plane
+
+paths:
+  /discovery/run:
+    post:
+      tags: [Execution Plane]
+      summary: Start a discovery run (crawl → scrub → delegate → poll → download)
+      security: [{ apiAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DiscoveryRunRequest' }
+      responses:
+        '202':
+          description: Accepted — run queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunAccepted' }
+        '400': { description: missing/invalid baseUrl }
+        '401': { description: unauthenticated / invalid HMAC signature }
+
+  /discovery/runs/{runId}:
+    get:
+      tags: [Execution Plane]
+      summary: Poll run status
+      security: [{ apiAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunStatus' }
+        '400': { description: bad run id }
+
+  /discovery/runs/{runId}/artifacts:
+    get:
+      tags: [Execution Plane]
+      summary: Download generated artefacts
+      security: [{ apiAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Artifacts' }
+        '404': { description: run not found }
+        '409': { description: artefacts not ready (run still active) }
+
+  /discovery/cancel/{runId}:
+    post:
+      tags: [Execution Plane]
+      summary: Cooperatively cancel a run
+      security: [{ apiAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200': { description: cancellation acknowledged }
+
+  /api/discovery:
+    post:
+      tags: [Intelligence Plane]
+      summary: Submit a scrubbed application surface for AI synthesis (async)
+      security: [{ oauth2: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DiscoveryPackage' }
+      responses:
+        '202':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IpRunAccepted' }
+        '400': { description: invalid appSurface }
+        '403': { description: discovery not enabled on tenant tier }
+
+  /api/discovery/{runId}:
+    get:
+      tags: [Intelligence Plane]
+      summary: Poll synthesis status (tenant-scoped)
+      security: [{ oauth2: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200': { description: status }
+        '404': { description: run not found / not owned by tenant }
+
+  /api/discovery/{runId}/artifacts:
+    get:
+      tags: [Intelligence Plane]
+      summary: Fetch synthesised artefacts (tenant-scoped)
+      security: [{ oauth2: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses:
+        '200': { description: artefacts }
+        '409': { description: not ready }
+        '404': { description: not found }
+
+  /api/discovery/{runId}/cancel:
+    post:
+      tags: [Intelligence Plane]
+      summary: Cancel a synthesis run
+      security: [{ oauth2: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses: { '200': { description: cancelled } }
+
+  /api/discovery/{runId}/retry:
+    post:
+      tags: [Intelligence Plane]
+      summary: Re-queue a failed/cancelled run
+      security: [{ oauth2: [] }]
+      parameters: [{ $ref: '#/components/parameters/RunId' }]
+      responses: { '200': { description: re-queued } }
+
+components:
+  parameters:
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9_\-]+$' }
+  securitySchemes:
+    apiAuth: { type: apiKey, in: header, name: X-API-Secret }
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: http://localhost:3001/oauth/token
+          scopes: {}
+  schemas:
+    DiscoveryRunRequest:
+      type: object
+      required: [baseUrl]
+      properties:
+        baseUrl:  { type: string, format: uri }
+        maxDepth: { type: integer, default: 2 }
+        maxPages: { type: integer, default: 40 }
+        username: { type: string }
+        password: { type: string }
+        headless: { type: boolean, default: true }
+        domain:   { type: string, example: hr }
+    RunAccepted:
+      type: object
+      properties:
+        accepted: { type: boolean }
+        runId:    { type: string }
+        status:   { type: string, enum: [queued] }
+        links:    { type: object }
+    RunStatus:
+      type: object
+      properties:
+        runId:    { type: string }
+        status:   { type: string, enum: [queued, running, completed, failed, cancelled] }
+        stage:    { type: string }
+        progress: { type: integer }
+        ipRunId:  { type: string, nullable: true }
+        crawlStats: { type: object, nullable: true }
+    DiscoveryPackage:
+      type: object
+      required: [appSurface]
+      properties:
+        target: { type: object }
+        domain: { type: string }
+        appSurface:
+          type: object
+          required: [routes]
+          properties:
+            routes:    { type: array, items: { type: object } }
+            pages:     { type: array, items: { type: object } }
+            endpoints: { type: array, items: { type: object } }
+        meta: { type: object }
+    IpRunAccepted:
+      type: object
+      properties:
+        runId:  { type: string }
+        status: { type: string }
+        links:  { type: object }
+    Artifacts:
+      type: object
+      properties:
+        runId: { type: string }
+        artifacts:
+          type: object
+          properties:
+            applicationModel: { type: object }
+            virtualStory:     { type: object, nullable: true }
+            contracts:        { type: array, items: { type: object } }
+            pageObjects:      { type: array, items: { type: object } }
+            contractTests:    { type: array, items: { type: object } }
+            report:           { type: string, description: HTML }
+            metadata:         { type: object }
