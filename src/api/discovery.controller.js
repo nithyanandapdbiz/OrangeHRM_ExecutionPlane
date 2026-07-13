@@ -16,12 +16,15 @@
 const fs   = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 
 const logger = require('../utils/logger');
 const {
   listCheckpoints, readCheckpointSafe
 } = require('../core/discovery.state');
+const appCrawler = require('../discovery/appCrawler');
+const execStore  = require('../discovery/discoveryExecutionStore');
+const { scrub }  = require('../../middleware/pii-scrubber');
+const IntelligenceClient = require('../../clients/intelligence.client');
 
 const ROOT       = path.resolve(__dirname, '..', '..');
 const LOCK_FILE  = path.join(ROOT, 'logs', '.discovery.lock');
@@ -131,73 +134,133 @@ function verifyHmac(req) {
   } catch (_) { return false; }
 }
 
+const POLL_INTERVAL_MS = parseInt(process.env.DISCOVERY_POLL_INTERVAL_MS || '2000', 10);
+const POLL_TIMEOUT_MS  = parseInt(process.env.DISCOVERY_POLL_TIMEOUT_MS  || '600000', 10);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Sovereign-Split worker. The Execution Plane crawls the customer app locally,
+ * scrubs PII, and delegates ALL AI synthesis to the Intelligence Plane. No AI
+ * reasoning, prompt-building or artefact generation ever happens here.
+ */
+async function runDiscoveryWorker(runId, body) {
+  const intel = new IntelligenceClient({ correlationId: runId });
+  try {
+    // 1 — Deterministic browser crawl (Execution-Plane responsibility)
+    execStore.markRunning(runId);
+    const captured = await appCrawler.crawl({
+      baseUrl: body.baseUrl,
+      maxDepth: body.maxDepth, maxPages: body.maxPages,
+      username: body.username, password: body.password,
+      headless: body.headless !== false,
+      isCancelled: () => execStore.isCancelled(runId),
+      onProgress: () => {},
+    });
+    execStore.setStage(runId, 'crawling', { crawlStats: captured.meta.crawlStats });
+    if (execStore.isCancelled(runId)) return;
+
+    // 2 — PII scrub BEFORE anything leaves the tenant boundary
+    execStore.setStage(runId, 'scrubbing');
+    const { scrubbed, fieldsRedacted } = scrub({ target: captured.target, appSurface: captured.appSurface, meta: captured.meta });
+    if (fieldsRedacted.length) logger.warn(`[discovery] PII redacted before egress: ${fieldsRedacted.join(', ')}`);
+
+    // 3 — Delegate synthesis to the Intelligence Plane (authenticated OAuth2)
+    execStore.setStage(runId, 'synthesising');
+    const submit = await intel.discover({ ...scrubbed, domain: body.domain });
+    if (!submit.success) throw new Error(`Intelligence Plane rejected discovery: ${submit.reason || submit.status}`);
+    const ipRunId = submit.data.runId;
+    execStore.setStage(runId, 'synthesising', { ipRunId });
+    logger.info(`[discovery] ${runId} → IP run ${ipRunId}`);
+
+    // 4 — Poll IP status until terminal
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    let ipStatus = 'running';
+    while (Date.now() < deadline) {
+      if (execStore.isCancelled(runId)) { await intel.cancelDiscovery(ipRunId).catch(() => {}); return; }
+      await sleep(POLL_INTERVAL_MS);
+      const st = await intel.getDiscoveryStatus(ipRunId);
+      if (!st.success) continue;
+      ipStatus = st.data.discovery.status;
+      if (['completed', 'failed', 'cancelled'].includes(ipStatus)) break;
+    }
+    if (ipStatus !== 'completed') throw new Error(`Intelligence Plane synthesis ${ipStatus}`);
+
+    // 5 — Download generated artefacts
+    execStore.setStage(runId, 'downloading', { ipRunId });
+    const art = await intel.downloadArtifacts(ipRunId);
+    if (!art.success) throw new Error(`artifact download failed: ${art.reason || art.status}`);
+
+    // 6 — Persist + complete
+    execStore.complete(runId, {
+      artifacts: art.data.artifacts,
+      artifactSummary: art.data.artifacts?.metadata || null,
+    });
+  } catch (err) {
+    execStore.fail(runId, err);
+  }
+}
+
 async function runDiscoveryEndpoint(req, res) {
   if (!verifyHmac(req)) return sendJson(res, { error: 'invalid-signature' }, 401);
 
   const body = req.body || {};
   const baseUrl = body.baseUrl;
-  if (!baseUrl || typeof baseUrl !== 'string') return sendJson(res, { error: 'missing-base-url' }, 400);
-
-  const runId = body.runId || `disc-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
-  if (!acquireLock(runId)) {
-    return sendJson(res, { error: 'busy', hint: 'another discovery run is in progress' }, 409);
+  if (!baseUrl || typeof baseUrl !== 'string' || !/^https?:\/\//i.test(baseUrl)) {
+    return sendJson(res, { error: 'missing-or-invalid-base-url' }, 400);
   }
 
-  const args = ['scripts/run-discovery.js', '--base-url', baseUrl];
-  if (body.maxDepth)   args.push('--max-depth', String(body.maxDepth));
-  if (body.maxPages)   args.push('--max-pages', String(body.maxPages));
-  if (body.username)   args.push('--username',  String(body.username));
-  if (body.password)   args.push('--password',  String(body.password));
-  if (body.headless === false) args.push('--headless=false');
-  if (body.resume)     args.push('--resume', String(body.resume));
-  if (body.skipPom)       args.push('--skip-pom');
-  if (body.skipSpecs)     args.push('--skip-specs');
-  if (body.skipContracts) args.push('--skip-contracts');
-  if (body.skipPerf)      args.push('--skip-perf');
-  if (body.skipSec)       args.push('--skip-sec');
-  if (body.dryRun)        args.push('--dry-run');
+  const run = execStore.create({ runId: body.runId, baseUrl });
+  setImmediate(() => runDiscoveryWorker(run.runId, body));
 
-  const logDir = path.join(ROOT, 'logs', 'discovery', runId);
-  try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
-  const logStream = fs.createWriteStream(path.join(logDir, 'stdout.log'), { flags: 'a' });
-  const errStream = fs.createWriteStream(path.join(logDir, 'stderr.log'), { flags: 'a' });
+  sendJson(res, {
+    accepted: true, runId: run.runId, status: run.status,
+    links: {
+      status:    `/discovery/runs/${run.runId}`,
+      artifacts: `/discovery/runs/${run.runId}/artifacts`,
+      cancel:    `/discovery/cancel/${run.runId}`,
+    },
+  }, 202);
+}
 
-  const env = { ...process.env, DISCOVERY_RUN_ID: runId };
-  const child = spawn(process.execPath, args, {
-    cwd: ROOT, env, detached: false, stdio: ['ignore', 'pipe', 'pipe']
-  });
-  child.stdout.pipe(logStream);
-  child.stderr.pipe(errStream);
-  child.on('exit', (code) => {
-    logger.info(`discovery.api: run ${runId} exited with code ${code}`);
-    releaseLock();
-  });
-  child.on('error', (err) => {
-    logger.error(`discovery.api: run ${runId} spawn error: ${err.message}`);
-    releaseLock();
-  });
+/** Live run status from the async execution store. */
+async function getRunStatus(req, res) {
+  const runId = String(req.params.runId || '').trim();
+  if (!/^[A-Za-z0-9_\-]+$/.test(runId)) return sendJson(res, { error: 'bad-run-id' }, 400);
+  const view = execStore.get(runId);
+  if (!view) return getRun(req, res); // fall back to checkpoint history
+  return sendJson(res, view);
+}
 
-  sendJson(res, { accepted: true, runId, pid: child.pid }, 202);
+/** Generated artefacts (409 until the run completes). */
+async function getArtifacts(req, res) {
+  const runId = String(req.params.runId || '').trim();
+  if (!/^[A-Za-z0-9_\-]+$/.test(runId)) return sendJson(res, { error: 'bad-run-id' }, 400);
+  const r = execStore.getArtifacts(runId);
+  if (!r) return sendJson(res, { error: 'not-found' }, 404);
+  if (!r.ready) return sendJson(res, { error: `artefacts not ready — run is ${r.status}`, status: r.status }, 409);
+  return sendJson(res, { runId, artifacts: r.artifacts });
 }
 
 async function cancelRun(req, res) {
   const runId = String(req.params.runId || '').trim();
   if (!/^[A-Za-z0-9_\-]+$/.test(runId)) return sendJson(res, { error: 'bad-run-id' }, 400);
-  // Mark a cancellation flag the runner can poll
-  const dir = path.join(ROOT, 'logs', 'discovery', runId);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'CANCEL'), String(Date.now()));
-    sendJson(res, { cancelled: true, runId });
-  } catch (err) {
-    sendJson(res, { error: 'internal', message: err.message }, 500);
+  const view = execStore.cancel(runId);
+  if (!view) {
+    // Legacy fallback: drop a CANCEL flag for any file-based runner.
+    const dir = path.join(ROOT, 'logs', 'discovery', runId);
+    try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'CANCEL'), String(Date.now())); } catch (_) {}
+    return sendJson(res, { cancelled: true, runId });
   }
+  return sendJson(res, view);
 }
 
 module.exports = {
   getSummary,
   listRuns,
   getRun,
+  getRunStatus,
+  getArtifacts,
   runDiscovery: runDiscoveryEndpoint,
-  cancelRun
+  runDiscoveryWorker,
+  cancelRun,
 };

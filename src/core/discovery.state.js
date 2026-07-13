@@ -78,9 +78,18 @@ async function writeCheckpoint(runId, stage, payload = {}) {
     warnings:    Array.isArray(payload.warnings) ? payload.warnings : (prior && prior.warnings) || []
   };
 
-  const tmp = file + '.tmp';
-  await fs.promises.writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
-  await fs.promises.rename(tmp, file);
+  // F3: unique temp file per write so concurrent same-runId checkpoints never share a
+  // temp path (the cause of intermittent ENOENT on rename). Rename is retried once, then
+  // falls back to a direct write. Checkpoint CONTENT is unchanged (determinism preserved).
+  const tmp = `${file}.tmp.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}`;
+  const body = JSON.stringify(next, null, 2);
+  await fs.promises.writeFile(tmp, body, 'utf8');
+  try {
+    await fs.promises.rename(tmp, file);
+  } catch (err) {
+    try { await fs.promises.rename(tmp, file); }
+    catch { await fs.promises.writeFile(file, body, 'utf8'); await fs.promises.unlink(tmp).catch(() => {}); }
+  }
   return { path: file, state: next };
 }
 

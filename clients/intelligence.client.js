@@ -191,6 +191,59 @@ class IntelligenceClient {
       return { reachable: false, error: e.message };
     }
   }
+
+  // ── Authenticated GET helper (mirrors _call error handling; no body → no scrub) ─
+  async _get(endpoint, { timeout = DEFAULT_TIMEOUT } = {}) {
+    try {
+      const resp = await axios.get(`${this.baseUrl}${endpoint}`, { headers: await this._headers(), timeout });
+      return { success: true, data: resp.data };
+    } catch (err) {
+      const status = err.response?.status;
+      const detail = err.response?.data;
+      if (status === 404) return { success: false, status: 404, reason: detail?.error || 'Not found' };
+      if (status === 409) return { success: false, status: 409, reason: detail?.error || 'Not ready', pending: true, runStatus: detail?.status };
+      if (status === 401) return { success: false, status: 401, blocked: detail?.blocked === true, reason: detail?.error || 'Unauthorized' };
+      if (status === 403) return { success: false, status: 403, reason: detail?.error || 'Forbidden' };
+      logger.error(`[IntelAPI] GET ${endpoint} failed: ${err.message}`);
+      return { success: false, status: status || 0, reason: err.message };
+    }
+  }
+
+  // ── Discovery (Sovereign Split: EP crawls locally, IP synthesises) ──────────
+
+  /**
+   * Submit a PII-scrubbed application surface for AI synthesis. The IP runs the
+   * discovery agents asynchronously and returns a runId to poll.
+   * @param {{ target: object, appSurface: object, meta?: object }} pkg
+   * @returns {Promise<{ success, data?: { runId, status, links } }>}
+   */
+  async discover(pkg) {
+    const routes = pkg?.appSurface?.routes?.length ?? 0;
+    logger.info(`[IntelAPI] POST /api/discovery  routes=${routes}`);
+    return this._call('/api/discovery', pkg);
+  }
+
+  /** Poll a discovery run's status. */
+  async getDiscoveryStatus(runId) {
+    return this._get(`/api/discovery/${encodeURIComponent(runId)}`);
+  }
+
+  /** Download generated artefacts (409 pending until the run completes). */
+  async downloadArtifacts(runId) {
+    return this._get(`/api/discovery/${encodeURIComponent(runId)}/artifacts`);
+  }
+
+  /** Request cooperative cancellation of a run. */
+  async cancelDiscovery(runId) {
+    logger.info(`[IntelAPI] POST /api/discovery/${runId}/cancel`);
+    return this._call(`/api/discovery/${encodeURIComponent(runId)}/cancel`, {});
+  }
+
+  /** Re-queue a failed/cancelled run. */
+  async retryDiscovery(runId) {
+    logger.info(`[IntelAPI] POST /api/discovery/${runId}/retry`);
+    return this._call(`/api/discovery/${encodeURIComponent(runId)}/retry`, {});
+  }
 }
 
 module.exports = IntelligenceClient;

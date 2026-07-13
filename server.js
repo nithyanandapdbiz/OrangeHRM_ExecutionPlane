@@ -32,6 +32,7 @@ app.use((_req, res, next) => { res.setHeader('X-API-Version', API_VERSION); next
 const apiRouter = express.Router();
 require('./routes/health')(apiRouter);
 require('./routes/run')(apiRouter);
+require('./routes/discovery')(apiRouter);
 
 app.use(`/${API_VERSION}`, apiRouter); // canonical: /v1/health, /v1/run
 app.use('/', apiRouter);               // legacy:    /health,    /run
