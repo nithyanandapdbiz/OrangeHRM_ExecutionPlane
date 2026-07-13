@@ -230,9 +230,13 @@ async function pollRun(cfg, runId) {
     const s = r.data;
     const pct = STAGE_PCT[s.stage] ?? s.progress ?? 0;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
-    if (!cfg.ci && s.stage !== lastStage) {
-      out(`  ${C.cyan('▸')} ${C.bold(String(s.stage).padEnd(13))} ${C.dim(`${pct}%`)}  ${C.dim(`${elapsed}s`)}`);
-      lastStage = s.stage;
+    // Show the Intelligence-Plane sub-stage when available (contract-extract →
+    // app-model → generate-artefacts → report → intelligence) so synthesis is visible.
+    const label = s.substage ? `${s.stage} · ${s.substage}` : s.stage;
+    const key = `${s.stage}|${s.substage || ''}`;
+    if (!cfg.ci && key !== lastStage) {
+      out(`  ${C.cyan('▸')} ${C.bold(String(label).padEnd(30))} ${C.dim(`${pct}%`)}  ${C.dim(`${elapsed}s`)}`);
+      lastStage = key;
     }
     if (['completed', 'failed', 'cancelled'].includes(s.status)) return { ...s, elapsedS: Number(elapsed) };
     await new Promise((r2) => setTimeout(r2, 3000));
@@ -265,6 +269,32 @@ function printSummary(runId, status, artifacts, savedDir) {
   const sevC = sev === 'high' ? C.red : sev === 'medium' ? C.yellow : C.green;
   row('Risk', sevC(`${sev}${intel.risk ? ` (${intel.risk.overall})` : ''}`));
   row('Recommendations', m.recommendations ?? '?');
+
+  // ── Reports & artefacts — listed explicitly so generation is visible ──
+  const reports = intel.reports || {};
+  const kinds = ['executive', 'architect', 'qa', 'developer'].filter((k) => reports[k]);
+  if (kinds.length || artifacts) {
+    out('  ' + C.dim('─'.repeat(46)));
+    out('  ' + C.bold('Reports generated'));
+    for (const k of kinds) out(`    ${C.green('✔')} ${k} report`);
+    if (typeof artifacts.report === 'string' && artifacts.report) {
+      out(`    ${C.green('✔')} discovery report.html   ${C.dim(`(${(artifacts.report.length / 1024).toFixed(0)} KB)`)}`);
+    }
+    out('  ' + C.bold('Artefacts generated'));
+    const a = (present, label) => out(`    ${present ? C.green('✔') : C.dim('·')} ${label}`);
+    a(artifacts.applicationModel, 'application model');
+    a(artifacts.navGraph, 'navigation graph');
+    a(artifacts.knowledgeGraph, `knowledge graph (${m.knowledgeGraphNodes ?? '?'} nodes / ${m.knowledgeGraphEdges ?? '?'} edges)`);
+    a((artifacts.workflows || []).length, `${(artifacts.workflows || []).length} workflows`);
+    a((intel.businessRules || []).length, `${(intel.businessRules || []).length} business rules`);
+    a(intel.coverage, 'coverage intelligence (+ heatmap)');
+    a(intel.risk, 'risk model');
+    a((intel.recommendations || []).length, `${(intel.recommendations || []).length} test recommendations`);
+    a((artifacts.pageObjects || []).length, `${(artifacts.pageObjects || []).length} page objects (Playwright POMs)`);
+    a((artifacts.contracts || []).length, `${(artifacts.contracts || []).length} API contracts`);
+    a((artifacts.contractTests || []).length, `${(artifacts.contractTests || []).length} contract tests`);
+    a(intel.aiReadiness, `AI-readiness contract (${intel.aiReadiness ? Object.keys(intel.aiReadiness.consumers || {}).length : 0} consumers)`);
+  }
   if (savedDir) { out('  ' + C.dim('─'.repeat(46))); out(`  ${C.dim('Artifacts →')} ${savedDir}`); }
   out('');
 }

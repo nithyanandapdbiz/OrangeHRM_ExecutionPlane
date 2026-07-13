@@ -74,7 +74,7 @@ function newRunId() {
 function publicView(rec) {
   if (!rec) return null;
   return {
-    runId: rec.runId, status: rec.status, stage: rec.stage, progress: rec.progress,
+    runId: rec.runId, status: rec.status, stage: rec.stage, substage: rec.substage || null, progress: rec.progress,
     baseUrl: rec.baseUrl, ipRunId: rec.ipRunId || null,
     startedAt: rec.startedAt, updatedAt: rec.updatedAt, completedAt: rec.completedAt || null,
     attempts: rec.attempts, error: rec.error || null,
@@ -121,6 +121,7 @@ function setStage(runId, stage, extra = {}) {
   rec.progress = STAGE_PROGRESS[stage] ?? rec.progress;
   if (extra.ipRunId) rec.ipRunId = extra.ipRunId;
   if (extra.crawlStats) rec.crawlStats = extra.crawlStats;
+  if (extra.substage !== undefined) rec.substage = extra.substage;
   rec.updatedAt = now();
   persist(rec);
 }

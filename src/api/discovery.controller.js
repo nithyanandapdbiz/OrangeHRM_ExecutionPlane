@@ -154,7 +154,8 @@ async function runDiscoveryWorker(runId, body) {
       username: body.username, password: body.password,
       headless: body.headless !== false,
       isCancelled: () => execStore.isCancelled(runId),
-      onProgress: () => {},
+      // Surface the live page count during the (long) crawl so the CLI shows progress.
+      onProgress: (p) => { try { execStore.setStage(runId, 'crawling', { substage: `${p.routes} page(s)` }); } catch { /* best-effort */ } },
     });
     execStore.setStage(runId, 'crawling', { crawlStats: captured.meta.crawlStats });
     if (execStore.isCancelled(runId)) return;
@@ -181,6 +182,9 @@ async function runDiscoveryWorker(runId, body) {
       const st = await intel.getDiscoveryStatus(ipRunId);
       if (!st.success) continue;
       ipStatus = st.data.discovery.status;
+      // Surface the IP synthesis sub-stage (contract-extract → app-model-synthesise →
+      // generate-artefacts → report → intelligence) so the CLI shows progress live.
+      execStore.setStage(runId, 'synthesising', { ipRunId, substage: st.data.discovery.stage });
       if (['completed', 'failed', 'cancelled'].includes(ipStatus)) break;
     }
     if (ipStatus !== 'completed') throw new Error(`Intelligence Plane synthesis ${ipStatus}`);
