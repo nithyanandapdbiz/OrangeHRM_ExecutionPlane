@@ -75,6 +75,7 @@ function publicView(rec) {
   if (!rec) return null;
   return {
     runId: rec.runId, status: rec.status, stage: rec.stage, substage: rec.substage || null, progress: rec.progress,
+    currentUrl: rec.currentUrl || null, pagesCrawled: rec.pagesCrawled || 0,
     baseUrl: rec.baseUrl, ipRunId: rec.ipRunId || null,
     startedAt: rec.startedAt, updatedAt: rec.updatedAt, completedAt: rec.completedAt || null,
     attempts: rec.attempts, error: rec.error || null,
@@ -122,6 +123,8 @@ function setStage(runId, stage, extra = {}) {
   if (extra.ipRunId) rec.ipRunId = extra.ipRunId;
   if (extra.crawlStats) rec.crawlStats = extra.crawlStats;
   if (extra.substage !== undefined) rec.substage = extra.substage;
+  if (extra.currentUrl !== undefined) rec.currentUrl = extra.currentUrl;
+  if (extra.pagesCrawled !== undefined) rec.pagesCrawled = extra.pagesCrawled;
   rec.updatedAt = now();
   persist(rec);
 }

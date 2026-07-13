@@ -145,6 +145,10 @@ function splitArtifacts(artifacts = {}) {
   json('risk.json', intel.risk);
   json('recommendations.json', intel.recommendations);
   json('reports.json', intel.reports);
+  // Also write each report as its own file under reports/ for a browsable tree.
+  for (const k of ['executive', 'architect', 'qa', 'developer']) {
+    if (intel.reports && intel.reports[k]) json(path.join('reports', `${k}.json`), intel.reports[k]);
+  }
   json('ai-readiness.json', intel.aiReadiness);
   for (const p of (artifacts.pageObjects || [])) if (p && p.name) files.push({ path: path.join('page-objects', p.name), content: p.content || '' });
   for (const t of (artifacts.contractTests || [])) if (t && t.name) files.push({ path: path.join('contract-tests', t.name), content: t.content || '' });
@@ -221,82 +225,156 @@ async function oauthToken(cfg) {
 
 // ── Poll a run to terminal with progress ─────────────────────────────────────
 const STAGE_PCT = { queued: 0, crawling: 25, scrubbing: 45, synthesising: 65, downloading: 88, completed: 100, failed: 100, cancelled: 100 };
+
+// Canonical pipeline order for the live stage checklist (EP stages + IP sub-stages).
+const PIPELINE = [
+  ['crawling', 'Crawling (browser)'],
+  ['scrubbing', 'PII Scrubbing'],
+  ['contract-extract', 'Contract Extraction'],
+  ['app-model-synthesise', 'Application Model'],
+  ['generate-artefacts', 'Artefact Generation'],
+  ['report', 'Report Generation'],
+  ['model', 'Workflows + Knowledge Graph'],
+  ['intelligence', 'Intelligence (rules/coverage/risk)'],
+  ['downloading', 'Packaging + Download'],
+  ['completed', 'Completed'],
+];
+function currentKey(stage, substage) {
+  if (stage === 'synthesising') return (PIPELINE.find(([k]) => k === substage) || ['contract-extract'])[0];
+  return stage;
+}
+function buildChecklist(stage, substage, terminal) {
+  const idx = PIPELINE.findIndex(([k]) => k === currentKey(stage, substage));
+  return PIPELINE.map(([, label], i) => {
+    if (terminal === 'completed') return { label, state: 'done' };
+    if (terminal === 'failed' || terminal === 'cancelled') return { label, state: i < idx ? 'done' : i === idx ? 'fail' : 'pending' };
+    if (idx < 0) return { label, state: 'pending' };
+    return { label, state: i < idx ? 'done' : i === idx ? 'active' : 'pending' };
+  });
+}
+function moduleFromUrl(u) {
+  try { const p = new URL(u).pathname.split('/').filter(Boolean); const i = p.indexOf('index.php'); return i >= 0 && p[i + 1] ? p[i + 1] : (p[0] || '-'); } catch { return '-'; }
+}
+function humanBytes(n) { if (n == null) return '?'; if (n < 1024) return `${n} B`; if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`; return `${(n / 1048576).toFixed(1)} MB`; }
+function bar(pct, w = 16) { const f = Math.max(0, Math.min(w, Math.round((pct / 100) * w))); return '█'.repeat(f) + '░'.repeat(w - f); }
+const ESC = String.fromCharCode(27);
+const ansiUp = (n) => (n > 0 ? ESC + '[' + n + 'A' : '');
+const CLEAR_DOWN = ESC + '[0J';
+const HR = () => C.dim('═'.repeat(54));
+
+// In-place TTY dashboard. Returns the number of lines drawn (for the next redraw).
+function renderDashboard(s, elapsed, prevLines) {
+  const pct = STAGE_PCT[s.stage] ?? s.progress ?? 0;
+  const L = [HR(),
+    `  ${C.bold('Discovery Run')}  ${C.cyan(s.runId)}`,
+    `  ${C.dim('Stage')} ${C.bold((s.substage ? `${s.stage} · ${s.substage}` : s.stage).padEnd(28))} ${C.dim('elapsed')} ${elapsed}s   ${C.cyan(bar(pct))} ${pct}%`,
+    HR()];
+  for (const it of buildChecklist(s.stage, s.substage, null)) {
+    const mark = it.state === 'done' ? C.green('✔') : it.state === 'active' ? C.cyan('▶') : it.state === 'fail' ? C.red('✘') : C.dim('○');
+    L.push(`    ${mark} ${it.state === 'active' ? C.bold(it.label) : it.state === 'pending' ? C.dim(it.label) : it.label}`);
+  }
+  if (s.stage === 'crawling' && s.currentUrl) {
+    L.push(HR(), `  ${C.dim('current')} ${C.bold(moduleFromUrl(s.currentUrl))}  ${C.dim('· pages')} ${C.bold(s.pagesCrawled || 0)}`, `  ${C.dim(String(s.currentUrl).slice(0, 62))}`);
+  }
+  L.push(HR());
+  process.stdout.write(ansiUp(prevLines) + CLEAR_DOWN + L.join('\n') + '\n');
+  return L.length;
+}
+
 async function pollRun(cfg, runId) {
   const t0 = Date.now();
-  let lastStage = '';
+  const tty = !cfg.ci && process.stdout.isTTY;
+  let lastKey = '', drawn = 0;
+  const timeline = [];
   for (;;) {
     const r = await http('get', `${cfg.epUrl}/discovery/runs/${runId}`, { retries: cfg.retries });
     if (r.status !== 200) throw new Error(`status ${r.status}`);
     const s = r.data;
-    const pct = STAGE_PCT[s.stage] ?? s.progress ?? 0;
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
-    // Show the Intelligence-Plane sub-stage when available (contract-extract →
-    // app-model → generate-artefacts → report → intelligence) so synthesis is visible.
-    const label = s.substage ? `${s.stage} · ${s.substage}` : s.stage;
+    const elapsed = Number(((Date.now() - t0) / 1000).toFixed(0));
     const key = `${s.stage}|${s.substage || ''}`;
-    if (!cfg.ci && key !== lastStage) {
-      out(`  ${C.cyan('▸')} ${C.bold(String(label).padEnd(30))} ${C.dim(`${pct}%`)}  ${C.dim(`${elapsed}s`)}`);
-      lastStage = key;
-    }
-    if (['completed', 'failed', 'cancelled'].includes(s.status)) return { ...s, elapsedS: Number(elapsed) };
-    await new Promise((r2) => setTimeout(r2, 3000));
+    const isNew = key !== lastKey;
+    if (isNew) { timeline.push({ t: elapsed, label: s.substage ? `${s.stage} · ${s.substage}` : s.stage }); log('info', 'stage', { runId, stage: s.stage, substage: s.substage || null, currentUrl: s.currentUrl || null, elapsed }); }
+    if (tty) drawn = renderDashboard(s, elapsed, drawn);
+    else if (!cfg.ci && isNew) out(`  ${C.cyan('▸')} ${C.bold(String(s.substage ? `${s.stage} · ${s.substage}` : s.stage).padEnd(30))} ${C.dim(`${elapsed}s`)}`);
+    if (isNew) lastKey = key;
+    if (['completed', 'failed', 'cancelled'].includes(s.status)) return { ...s, elapsedS: elapsed, timeline };
+    await new Promise((r2) => setTimeout(r2, tty ? 1000 : 3000));
   }
 }
 
 // ── Pretty summary ───────────────────────────────────────────────────────────
-function printSummary(runId, status, artifacts, savedDir) {
+// Recursive artefact tree with file sizes (for the final dashboard).
+function artifactTree(dir, prefix = '  ') {
+  const lines = [];
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return lines; }
+  entries.sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : (a.isDirectory() ? -1 : 1)));
+  entries.forEach((e, i) => {
+    const last = i === entries.length - 1;
+    const branch = last ? '└── ' : '├── ';
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      let n = 0; try { n = fs.readdirSync(full).length; } catch { /* */ }
+      lines.push(`${prefix}${branch}${C.cyan(e.name + '/')}  ${C.dim(`(${n} files)`)}`);
+      lines.push(...artifactTree(full, prefix + (last ? '    ' : '│   ')));
+    } else {
+      let sz = 0; try { sz = fs.statSync(full).size; } catch { /* */ }
+      lines.push(`${prefix}${branch}${e.name}  ${C.dim(humanBytes(sz))}`);
+    }
+  });
+  return lines;
+}
+
+// Grouped enterprise final dashboard (Application / Knowledge / Automation /
+// Intelligence / Performance / Reports / Timeline / Artefacts).
+function finalDashboard(runId, status, artifacts, savedDir, timeline) {
   const m = (artifacts && artifacts.metadata) || {};
   const intel = (artifacts && artifacts.intelligence) || {};
-  out('');
-  out(C.green(C.bold('  ✔ Discovery Completed')));
-  out('  ' + C.dim('─'.repeat(46)));
-  const row = (k, v) => out(`  ${String(k).padEnd(22)} ${C.bold(v)}`);
-  row('Run Id', runId);
-  row('IP Run Id', status.ipRunId || '-');
-  row('Duration', `${status.elapsedS ?? '?'}s`);
-  row('Pages', m.routes ?? '?');
-  row('Components', m.components ?? '?');
-  row('Forms', m.forms ?? '?');
-  row('Endpoints', (status.crawlStats && status.crawlStats.endpoints) ?? '?');
-  row('POMs', m.pageObjects ?? '?');
-  row('Contracts', m.contracts ?? '?');
-  row('Contract Tests', m.contractTests ?? '?');
-  row('Workflows', m.workflows ?? '?');
-  row('Knowledge Graph', `${m.knowledgeGraphNodes ?? '?'} nodes / ${m.knowledgeGraphEdges ?? '?'} edges`);
-  row('Business Rules', m.businessRules ?? '?');
-  row('Coverage', `${m.coverage ?? '?'}%`);
+  const kgStats = (artifacts && artifacts.knowledgeGraph && artifacts.knowledgeGraph.stats) || {};
+  const grp = (t) => out('  ' + C.bold(t));
+  const kv = (k, v) => out(`    ${C.dim(String(k).padEnd(18))} ${v}`);
+  out(''); out(HR()); out('  ' + C.green(C.bold('DISCOVERY SUMMARY')) + '   ' + C.dim(runId)); out(HR());
+
+  grp('Application');
+  kv('Pages', m.routes ?? '?'); kv('Components', m.components ?? '?'); kv('Forms', m.forms ?? '?');
+  kv('Endpoints', (status.crawlStats && status.crawlStats.endpoints) ?? m.contracts ?? '?');
+  kv('Modules', (kgStats.byType && kgStats.byType.Module) ?? '?');
+
+  grp('Knowledge');
+  kv('Graph nodes', m.knowledgeGraphNodes ?? '?'); kv('Graph edges', m.knowledgeGraphEdges ?? '?');
+  kv('Workflows', m.workflows ?? '?'); kv('Business rules', m.businessRules ?? '?');
+
+  grp('Automation');
+  kv('Page objects', m.pageObjects ?? '?'); kv('API contracts', m.contracts ?? '?'); kv('Contract tests', m.contractTests ?? '?');
+
+  grp('Intelligence');
   const sev = m.riskSeverity || (intel.risk && intel.risk.severity) || '?';
   const sevC = sev === 'high' ? C.red : sev === 'medium' ? C.yellow : C.green;
-  row('Risk', sevC(`${sev}${intel.risk ? ` (${intel.risk.overall})` : ''}`));
-  row('Recommendations', m.recommendations ?? '?');
+  kv('Coverage', `${m.coverage ?? '?'}%`); kv('Risk', sevC(`${sev}${intel.risk ? ` (${intel.risk.overall})` : ''}`));
+  kv('Recommendations', m.recommendations ?? '?'); kv('AI consumers', intel.aiReadiness ? Object.keys(intel.aiReadiness.consumers || {}).length : '?');
 
-  // ── Reports & artefacts — listed explicitly so generation is visible ──
+  grp('Performance');
+  const crawlMs = status.crawlStats && status.crawlStats.durationMs;
+  kv('Total', `${status.elapsedS ?? '?'}s`);
+  kv('Crawl (browser)', crawlMs != null ? `${(crawlMs / 1000).toFixed(1)}s` : '?');
+  kv('Synthesis + dl', (crawlMs != null && status.elapsedS != null) ? `~${Math.max(0, status.elapsedS - crawlMs / 1000).toFixed(1)}s` : '?');
+
+  out(HR()); grp('Reports');
   const reports = intel.reports || {};
-  const kinds = ['executive', 'architect', 'qa', 'developer'].filter((k) => reports[k]);
-  if (kinds.length || artifacts) {
-    out('  ' + C.dim('─'.repeat(46)));
-    out('  ' + C.bold('Reports generated'));
-    for (const k of kinds) out(`    ${C.green('✔')} ${k} report`);
-    if (typeof artifacts.report === 'string' && artifacts.report) {
-      out(`    ${C.green('✔')} discovery report.html   ${C.dim(`(${(artifacts.report.length / 1024).toFixed(0)} KB)`)}`);
-    }
-    out('  ' + C.bold('Artefacts generated'));
-    const a = (present, label) => out(`    ${present ? C.green('✔') : C.dim('·')} ${label}`);
-    a(artifacts.applicationModel, 'application model');
-    a(artifacts.navGraph, 'navigation graph');
-    a(artifacts.knowledgeGraph, `knowledge graph (${m.knowledgeGraphNodes ?? '?'} nodes / ${m.knowledgeGraphEdges ?? '?'} edges)`);
-    a((artifacts.workflows || []).length, `${(artifacts.workflows || []).length} workflows`);
-    a((intel.businessRules || []).length, `${(intel.businessRules || []).length} business rules`);
-    a(intel.coverage, 'coverage intelligence (+ heatmap)');
-    a(intel.risk, 'risk model');
-    a((intel.recommendations || []).length, `${(intel.recommendations || []).length} test recommendations`);
-    a((artifacts.pageObjects || []).length, `${(artifacts.pageObjects || []).length} page objects (Playwright POMs)`);
-    a((artifacts.contracts || []).length, `${(artifacts.contracts || []).length} API contracts`);
-    a((artifacts.contractTests || []).length, `${(artifacts.contractTests || []).length} contract tests`);
-    a(intel.aiReadiness, `AI-readiness contract (${intel.aiReadiness ? Object.keys(intel.aiReadiness.consumers || {}).length : 0} consumers)`);
+  for (const k of ['executive', 'architect', 'qa', 'developer']) {
+    const ok = !!reports[k];
+    const sz = ok ? humanBytes(Buffer.byteLength(JSON.stringify(reports[k]))) : '-';
+    out(`    ${ok ? C.green('✔') : C.dim('·')} ${String(`${k} report`).padEnd(20)} ${C.dim(String(sz).padStart(8))}  ${C.dim(`reports/${k}.json`)}`);
   }
-  if (savedDir) { out('  ' + C.dim('─'.repeat(46))); out(`  ${C.dim('Artifacts →')} ${savedDir}`); }
-  out('');
+  if (typeof artifacts.report === 'string' && artifacts.report) {
+    out(`    ${C.green('✔')} ${'discovery HTML'.padEnd(20)} ${C.dim(humanBytes(artifacts.report.length).padStart(8))}  ${C.dim('report.html')}`);
+  }
+
+  if (timeline && timeline.length) { out(HR()); grp('Timeline'); for (const e of timeline) out(`    ${C.dim(`${String(e.t).padStart(4)}s`)}  ${e.label}`); }
+
+  if (savedDir) { out(HR()); grp(`Artifacts  ${C.dim(savedDir)}`); for (const l of artifactTree(savedDir)) out(l); }
+
+  out(HR()); out('  ' + C.green(C.bold('STATUS: SUCCESS'))); out(HR()); out('');
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -322,7 +400,7 @@ async function cmdDiscover(cfg, { runId } = {}) {
   if (cfg.ci) {
     out(JSON.stringify({ runId, ipRunId: status.ipRunId, status: status.status, metadata: artifacts && artifacts.metadata, artifactsDir: saved && saved.dir }));
   } else if (status.status === 'completed') {
-    printSummary(runId, status, artifacts, saved && `${saved.dir} (${saved.count} files)`);
+    finalDashboard(runId, status, artifacts, saved && saved.dir, status.timeline);
   } else {
     out(C.red(`  x Discovery ${status.status}${status.error ? ` — ${status.error}` : ''}`));
   }
@@ -467,4 +545,4 @@ if (require.main === module) {
   main().then((code) => process.exit(code)).catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { parseArgs, resolveConfig, buildRunBody, splitArtifacts, isSafeArtifactPath, loadRc, main, http, __setHttpClient };
+module.exports = { parseArgs, resolveConfig, buildRunBody, splitArtifacts, isSafeArtifactPath, buildChecklist, currentKey, moduleFromUrl, humanBytes, artifactTree, PIPELINE, loadRc, main, http, __setHttpClient };

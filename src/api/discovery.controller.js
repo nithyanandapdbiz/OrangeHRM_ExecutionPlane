@@ -155,7 +155,7 @@ async function runDiscoveryWorker(runId, body) {
       headless: body.headless !== false,
       isCancelled: () => execStore.isCancelled(runId),
       // Surface the live page count during the (long) crawl so the CLI shows progress.
-      onProgress: (p) => { try { execStore.setStage(runId, 'crawling', { substage: `${p.routes} page(s)` }); } catch { /* best-effort */ } },
+      onProgress: (p) => { try { execStore.setStage(runId, 'crawling', { substage: `${p.routes} page(s)`, currentUrl: p.url, pagesCrawled: p.routes }); } catch { /* best-effort */ } },
     });
     execStore.setStage(runId, 'crawling', { crawlStats: captured.meta.crawlStats });
     if (execStore.isCancelled(runId)) return;
