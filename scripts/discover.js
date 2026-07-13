@@ -79,7 +79,7 @@ function resolveConfig(args, env = process.env, rc = loadRc()) {
     maxDepth: first(num(args.depth), num(env.DISCOVERY_DEPTH), rc.maxDepth, 3),
     maxPages: first(num(args.pages), num(env.DISCOVERY_PAGES), rc.maxPages, 60),
     strategy: first(args.strategy, env.DISCOVERY_STRATEGY, rc.strategy, 'bfs'),
-    headless: first(args.headless, rc.headless, true) !== 'false',
+    headless: String(first(args.headless, rc.headless, true)) !== 'false',
     domain: first(args.domain, env.DISCOVERY_DOMAIN, rc.domain, 'hr'),
     clientId: first(env.CLIENT_ID, rc.clientId),
     clientSecret: first(env.CLIENT_SECRET, rc.clientSecret),
