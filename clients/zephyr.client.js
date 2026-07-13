@@ -182,24 +182,30 @@ class ZephyrClient {
     const passed = results.filter((r) => r.passed).length;
     const failed = results.length - passed;
     let synced = 0;
+    const executions = [];
     for (const r of results) {
+      // An explicit statusName (e.g. 'Blocked') wins; a caller-supplied comment
+      // (used by governance to carry metrics/timeline on a Pass) wins over the
+      // default empty-on-pass / error-on-fail comment.
+      const comment = (r.comment != null ? String(r.comment) : (r.passed ? '' : (r.error || ''))).slice(0, 2000);
       const body = {
         projectKey: this.projectKey,
         testCycleKey: cycleKey,
-        statusName: r.passed ? this.statuses.pass : this.statuses.fail,
+        statusName: r.statusName || (r.passed ? this.statuses.pass : this.statuses.fail),
         executionTime: r.durationMs || 0,
-        comment: r.passed ? '' : (r.error || '').slice(0, 2000),
+        comment,
         ...(r.testCaseKey ? { testCaseKey: r.testCaseKey } : {}),
       };
       try {
-        await this.http.post('/testexecutions', body);
+        const created = await this.http.post('/testexecutions', body);
+        if (created && (created.key || created.id)) executions.push(created.key || created.id);
         synced++;
       } catch (e) {
         logger.warn(`[Zephyr] Could not record execution for "${r.title}": ${e.message}`);
       }
     }
     logger.info(`[Zephyr] Executions synced: ${synced}/${results.length} (${passed} Pass / ${failed} Fail) → cycle ${cycleKey}`);
-    return { ok: synced > 0, synced, passed, failed };
+    return { ok: synced > 0, synced, passed, failed, executions };
   }
 
   /**

@@ -83,6 +83,24 @@ class AlmClient {
   async createBug(title, stepsToRepro, parentKey, priority = 'High') {
     return this.jira.createBug(title, stepsToRepro, parentKey, priority);
   }
+
+  // ── Comments (issue tracker) ────────────────────────────────────────────────
+  // Governance publishes Discovery stage/status/evidence as Jira story comments
+  // (the reliable channel when Zephyr attachment/execution-update APIs are limited).
+  // Never throws — governance must not break the underlying Discovery run.
+  async addComment(issueKey, text) {
+    if (!issueKey || !text) return { ok: false };
+    try {
+      await this.jira.addComment(issueKey, text);
+      return { ok: true };
+    } catch (e) {
+      logger.warn(`[ALM] addComment failed for ${issueKey}: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  // Whether the underlying test-management provider is configured (has a token).
+  get zephyrEnabled() { return !!this.zephyr.enabled; }
 }
 
 module.exports = AlmClient;

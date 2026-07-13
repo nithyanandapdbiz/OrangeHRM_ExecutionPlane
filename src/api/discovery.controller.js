@@ -25,6 +25,7 @@ const appCrawler = require('../discovery/appCrawler');
 const execStore  = require('../discovery/discoveryExecutionStore');
 const { scrub }  = require('../../middleware/pii-scrubber');
 const IntelligenceClient = require('../../clients/intelligence.client');
+const { governanceFor } = require('../discovery/zephyrGovernance');
 
 const ROOT       = path.resolve(__dirname, '..', '..');
 const LOCK_FILE  = path.join(ROOT, 'logs', '.discovery.lock');
@@ -143,9 +144,50 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * scrubs PII, and delegates ALL AI synthesis to the Intelligence Plane. No AI
  * reasoning, prompt-building or artefact generation ever happens here.
  */
+// Best-effort governance mirror: never let a Zephyr/Jira hiccup fail a run.
+async function govSync(gov, runId, fn) {
+  if (!gov) return;
+  try {
+    const snap = await fn(gov);
+    if (snap) execStore.mergeGovernance(runId, snap);
+  } catch (e) { logger.warn(`[discovery] governance sync failed ${runId}: ${e.message}`); }
+}
+
+// Names of the artefacts present, for the Zephyr/Jira evidence manifest.
+function artifactManifest(a = {}) {
+  const names = [];
+  const add = (name, ok) => { if (ok) names.push(name); };
+  add('metadata.json', a.metadata);
+  add('application-model.json', a.applicationModel);
+  add('navigation-graph.json', a.navGraph);
+  add('knowledge-graph.json', a.knowledgeGraph);
+  add('workflows.json', a.workflows);
+  add('contracts.json', a.contracts);
+  const intel = a.intelligence || {};
+  add('business-rules.json', intel.businessRules);
+  add('coverage.json', intel.coverage);
+  add('risk.json', intel.risk);
+  add('recommendations.json', intel.recommendations);
+  add('ai-readiness.json', intel.aiReadiness);
+  for (const k of ['executive', 'architect', 'qa', 'developer']) add(`reports/${k}.json`, intel.reports && intel.reports[k]);
+  if (Array.isArray(a.pageObjects) && a.pageObjects.length) names.push(`page-objects/ (${a.pageObjects.length})`);
+  if (Array.isArray(a.contractTests) && a.contractTests.length) names.push(`contract-tests/ (${a.contractTests.length})`);
+  if (typeof a.report === 'string' && a.report) names.push('report.html');
+  return names;
+}
+
 async function runDiscoveryWorker(runId, body) {
   const intel = new IntelligenceClient({ correlationId: runId });
+  // Zephyr Essential native workflow (config-gated). null → unchanged standalone lifecycle.
+  const gov = governanceFor(body);
+  let ipRunIdOuter = null;
   try {
+    // 0 — Governance: create cycle + link Jira story (Discovery Requested → Create Cycle)
+    await govSync(gov, runId, (g) => g.begin({
+      discoveryRunId: runId, baseUrl: body.baseUrl,
+      browser: body.headless === false ? 'chromium (headed)' : 'chromium (headless)',
+    }));
+
     // 1 — Deterministic browser crawl (Execution-Plane responsibility)
     execStore.markRunning(runId);
     const captured = await appCrawler.crawl({
@@ -158,48 +200,70 @@ async function runDiscoveryWorker(runId, body) {
       onProgress: (p) => { try { execStore.setStage(runId, 'crawling', { substage: `${p.routes} page(s)`, currentUrl: p.url, pagesCrawled: p.routes }); } catch { /* best-effort */ } },
     });
     execStore.setStage(runId, 'crawling', { crawlStats: captured.meta.crawlStats });
-    if (execStore.isCancelled(runId)) return;
+    await govSync(gov, runId, (g) => g.syncStage('crawling', 'crawling', `${captured.meta.crawlStats?.routes ?? captured.meta.crawlStats?.pages ?? ''} pages discovered`.trim()));
+    if (execStore.isCancelled(runId)) { await govSync(gov, runId, (g) => g.cancel({})); return; }
 
     // 2 — PII scrub BEFORE anything leaves the tenant boundary
     execStore.setStage(runId, 'scrubbing');
+    await govSync(gov, runId, (g) => g.syncStage('scrubbing', 'scrubbing'));
     const { scrubbed, fieldsRedacted } = scrub({ target: captured.target, appSurface: captured.appSurface, meta: captured.meta });
     if (fieldsRedacted.length) logger.warn(`[discovery] PII redacted before egress: ${fieldsRedacted.join(', ')}`);
 
     // 3 — Delegate synthesis to the Intelligence Plane (authenticated OAuth2)
     execStore.setStage(runId, 'synthesising');
+    await govSync(gov, runId, (g) => g.syncStage('synthesising', 'synthesising'));
     const submit = await intel.discover({ ...scrubbed, domain: body.domain });
     if (!submit.success) throw new Error(`Intelligence Plane rejected discovery: ${submit.reason || submit.status}`);
     const ipRunId = submit.data.runId;
+    ipRunIdOuter = ipRunId;
     execStore.setStage(runId, 'synthesising', { ipRunId });
     logger.info(`[discovery] ${runId} → IP run ${ipRunId}`);
 
     // 4 — Poll IP status until terminal
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     let ipStatus = 'running';
+    let lastSubstage = null;
     while (Date.now() < deadline) {
-      if (execStore.isCancelled(runId)) { await intel.cancelDiscovery(ipRunId).catch(() => {}); return; }
+      if (execStore.isCancelled(runId)) { await intel.cancelDiscovery(ipRunId).catch(() => {}); await govSync(gov, runId, (g) => g.cancel({ ipRunId })); return; }
       await sleep(POLL_INTERVAL_MS);
       const st = await intel.getDiscoveryStatus(ipRunId);
       if (!st.success) continue;
       ipStatus = st.data.discovery.status;
       // Surface the IP synthesis sub-stage (contract-extract → app-model-synthesise →
       // generate-artefacts → report → intelligence) so the CLI shows progress live.
-      execStore.setStage(runId, 'synthesising', { ipRunId, substage: st.data.discovery.stage });
+      const substage = st.data.discovery.stage;
+      execStore.setStage(runId, 'synthesising', { ipRunId, substage });
+      // Governance: comment only on a distinct sub-stage transition (not every poll).
+      if (substage && substage !== lastSubstage) {
+        lastSubstage = substage;
+        await govSync(gov, runId, (g) => g.syncStage('synthesising', 'synthesising', substage));
+      }
       if (['completed', 'failed', 'cancelled'].includes(ipStatus)) break;
     }
     if (ipStatus !== 'completed') throw new Error(`Intelligence Plane synthesis ${ipStatus}`);
 
     // 5 — Download generated artefacts
     execStore.setStage(runId, 'downloading', { ipRunId });
+    await govSync(gov, runId, (g) => g.syncStage('downloading', 'downloading'));
     const art = await intel.downloadArtifacts(ipRunId);
     if (!art.success) throw new Error(`artifact download failed: ${art.reason || art.status}`);
 
-    // 6 — Persist + complete
+    // 6 — Governance: finalise Zephyr execution + evidence BEFORE flipping terminal,
+    //     so the polling CLI observes the completed cycle/execution atomically.
+    await govSync(gov, runId, (g) => g.complete({
+      metadata: art.data.artifacts?.metadata || {},
+      artifactFiles: artifactManifest(art.data.artifacts),
+      ipRunId,
+    }));
+
+    // 7 — Persist + complete
     execStore.complete(runId, {
       artifacts: art.data.artifacts,
       artifactSummary: art.data.artifacts?.metadata || null,
     });
   } catch (err) {
+    // Governance failure sync first (execution → FAIL, never left IN PROGRESS).
+    await govSync(gov, runId, (g) => g.fail({ error: err.message, ipRunId: ipRunIdOuter }));
     execStore.fail(runId, err);
   }
 }

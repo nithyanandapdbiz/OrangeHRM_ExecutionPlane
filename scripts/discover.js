@@ -48,7 +48,7 @@ function log(level, msg, extra) {
 }
 
 // ── Arg parsing (supports --k v, --k=v, boolean flags) ───────────────────────
-const BOOL_FLAGS = new Set(['resume', 'delta', 'ci', 'help', 'headless', 'no-download', 'json']);
+const BOOL_FLAGS = new Set(['resume', 'delta', 'ci', 'help', 'headless', 'no-download', 'json', 'zephyr']);
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -87,6 +87,27 @@ function resolveConfig(args, env = process.env, rc = loadRc()) {
     ci: Boolean(args.ci),
     download: args['no-download'] ? false : true,
   };
+  // ── Zephyr Essential native-workflow governance (opt-in) ──────────────────
+  // Enable with --zephyr, ZEPHYR_GOVERNANCE=true, or "zephyr":{"enabled":true} in
+  // .discoveryrc.json. Values are forwarded to the EP, which owns the Jira/Zephyr
+  // credentials and does the authoritative defaulting (see zephyrGovernance.js).
+  const rz = rc.zephyr || {};
+  const bool = (v) => (v === undefined || v === '' ? undefined : (v === true || String(v).toLowerCase() === 'true'));
+  cfg.zephyr = {
+    enabled: Boolean(args.zephyr) || bool(first(env.ZEPHYR_GOVERNANCE, rz.enabled)) || false,
+    project: first(args['zephyr-project'], env.ZEPHYR_PROJECT, rz.project),
+    release: first(args['zephyr-release'], env.ZEPHYR_RELEASE, rz.release),
+    cycle: first(args['zephyr-cycle'], env.ZEPHYR_CYCLE, rz.cycle),
+    folder: first(args['zephyr-folder'], env.ZEPHYR_FOLDER, rz.folder),
+    story: first(args['zephyr-story'], env.ZEPHYR_STORY, env.ISSUE_KEY, rz.story),
+    environment: first(args.env, env.DISCOVERY_ENV, rz.environment),
+    build: first(args.build, env.DISCOVERY_BUILD, rz.build),
+    browser: cfg.headless ? 'chromium (headless)' : 'chromium (headed)',
+    autoCreateCycle: bool(first(args['auto-create-cycle'], env.AUTO_CREATE_CYCLE, rz.autoCreateCycle)),
+    autoCreateExecution: bool(first(env.AUTO_CREATE_EXECUTION, rz.autoCreateExecution)),
+    autoUploadArtifacts: bool(first(env.AUTO_UPLOAD_ARTIFACTS, rz.autoUploadArtifacts)),
+    autoSyncStatus: bool(first(env.AUTO_SYNC_STATUS, rz.autoSyncStatus)),
+  };
   return cfg;
 }
 
@@ -95,6 +116,7 @@ function buildRunBody(cfg) {
     baseUrl: cfg.baseUrl, maxDepth: cfg.maxDepth, maxPages: cfg.maxPages,
     strategy: cfg.strategy, username: cfg.username, password: cfg.password,
     headless: cfg.headless, domain: cfg.domain,
+    ...(cfg.zephyr && cfg.zephyr.enabled ? { zephyr: cfg.zephyr } : {}),
   };
 }
 
@@ -359,6 +381,18 @@ function finalDashboard(runId, status, artifacts, savedDir, timeline) {
   kv('Crawl (browser)', crawlMs != null ? `${(crawlMs / 1000).toFixed(1)}s` : '?');
   kv('Synthesis + dl', (crawlMs != null && status.elapsedS != null) ? `~${Math.max(0, status.elapsedS - crawlMs / 1000).toFixed(1)}s` : '?');
 
+  if (status.zephyr && status.zephyr.enabled) {
+    const z = status.zephyr;
+    out(HR()); grp('Zephyr Governance');
+    kv('Discovery', C.green('PASS'));
+    kv('Zephyr', z.zephyrStatus === 'Pass' ? C.green('PASS') : C.yellow(z.zephyrStatus || '?'));
+    kv('Cycle', z.cycleKey || C.dim('(none)'));
+    kv('Execution', z.executionKey || C.dim('(none)'));
+    kv('Jira', z.story ? C.green(`Linked (${z.story})`) : C.dim('not linked'));
+    kv('Stage syncs', z.comments ?? 0);
+    kv('Evidence', z.evidence && z.evidence.uploaded ? C.green(`Uploaded (${z.evidence.count} artifacts)`) : C.dim('—'));
+  }
+
   out(HR()); grp('Reports');
   const reports = intel.reports || {};
   for (const k of ['executive', 'architect', 'qa', 'developer']) {
@@ -398,11 +432,15 @@ async function cmdDiscover(cfg, { runId } = {}) {
   log('info', 'discovery finished', { runId, status: status.status, ipRunId: status.ipRunId });
 
   if (cfg.ci) {
-    out(JSON.stringify({ runId, ipRunId: status.ipRunId, status: status.status, metadata: artifacts && artifacts.metadata, artifactsDir: saved && saved.dir }));
+    out(JSON.stringify({ runId, ipRunId: status.ipRunId, status: status.status, metadata: artifacts && artifacts.metadata, artifactsDir: saved && saved.dir, zephyr: status.zephyr || null }));
   } else if (status.status === 'completed') {
     finalDashboard(runId, status, artifacts, saved && saved.dir, status.timeline);
   } else {
     out(C.red(`  x Discovery ${status.status}${status.error ? ` — ${status.error}` : ''}`));
+    if (status.zephyr && status.zephyr.enabled) {
+      const z = status.zephyr;
+      out(`    ${C.dim('Zephyr')} ${C.yellow(z.zephyrStatus || '?')}  ${C.dim('cycle')} ${z.cycleKey || '(none)'}  ${C.dim('exec')} ${z.executionKey || '(none)'}${z.story ? `  ${C.dim('jira')} ${z.story}` : ''}`);
+    }
   }
   return status.status === 'completed' ? 0 : 1;
 }

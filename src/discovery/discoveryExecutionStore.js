@@ -80,6 +80,7 @@ function publicView(rec) {
     startedAt: rec.startedAt, updatedAt: rec.updatedAt, completedAt: rec.completedAt || null,
     attempts: rec.attempts, error: rec.error || null,
     crawlStats: rec.crawlStats || null, artifactSummary: rec.artifactSummary || null,
+    zephyr: rec.zephyr || null,
   };
 }
 
@@ -127,6 +128,16 @@ function setStage(runId, stage, extra = {}) {
   if (extra.pagesCrawled !== undefined) rec.pagesCrawled = extra.pagesCrawled;
   rec.updatedAt = now();
   persist(rec);
+}
+
+// Zephyr governance mirror — a serialisable snapshot of the run's Zephyr/Jira
+// governance state. Recorded even on terminal records (governance finalises at
+// the terminal transition) so the polling CLI sees the final cycle/execution.
+function mergeGovernance(runId, patch) {
+  const rec = runs.get(runId);
+  if (!rec || !patch) return;
+  rec.zephyr = { ...(rec.zephyr || {}), ...patch };
+  rec.updatedAt = now();
 }
 
 function markRunning(runId) {
@@ -194,5 +205,5 @@ function _reset() { runs.clear(); evictedCount = 0; }
 module.exports = {
   create, setStage, markRunning, complete, fail, cancel, isCancelled,
   get, getArtifacts, list, newRunId, publicView, _reset, RUN_DIR,
-  evict, metrics, RETENTION,
+  evict, metrics, RETENTION, mergeGovernance,
 };
