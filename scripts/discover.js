@@ -23,6 +23,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const axios = require('axios');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -347,9 +348,103 @@ function artifactTree(dir, prefix = '  ') {
   return lines;
 }
 
+// ── Governance audit package (Phases 2/3/5/7) ────────────────────────────────
+// Written alongside the downloaded artefacts so a compliance auditor can replay
+// the whole run WITHOUT accessing live Jira/Zephyr. Only produced when governance
+// is enabled — otherwise behaviour is byte-identical to today (backward compat).
+function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+function readPkgVersion() {
+  try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || null; } catch { return null; }
+}
+
+// Phase 3 — evidence manifest: every written artefact with size + SHA-256 + time.
+function buildEvidenceManifest(dir) {
+  const items = [];
+  const walk = (d, rel) => {
+    let entries; try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = path.join(d, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { walk(full, r); continue; }
+      try {
+        const buf = fs.readFileSync(full);
+        const st = fs.statSync(full);
+        items.push({ filename: r, size: st.size, sha256: sha256(buf), generatedAt: st.mtime.toISOString(), status: 'present', location: r });
+      } catch { /* skip unreadable */ }
+    }
+  };
+  walk(dir, '');
+  return items;
+}
+
+// Phase 2 — governance.json (permanent audit record).
+function buildGovernance(runId, status, artifacts, evidence) {
+  const z = status.zephyr || {};
+  return {
+    schema: 'discovery-governance/v1',
+    runId,
+    ipRunId: status.ipRunId || (z.correlationIds && z.correlationIds.ipRunId) || null,
+    tenant: z.tenant || null,
+    jira: z.story || null,
+    zephyr: { cycle: z.cycleKey || null, execution: z.executionKey || null, status: z.zephyrStatus || null },
+    governanceResult: z.governanceResult || null,
+    timeline: z.timeline || [],
+    comments: z.commentLog || [],
+    evidence,
+    metrics: z.metrics || {},
+    compliance: z.compliance || null,
+    metrics_summary: { evidenceFiles: evidence.length, comments: z.comments || 0, timelineEvents: (z.timeline || []).length },
+    metadata: (artifacts && artifacts.metadata) || null,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+// Phase 7 — audit-report.json (immutable, self-contained audit).
+function buildAuditReport(runId, status, artifacts, evidence, governance) {
+  const z = status.zephyr || {};
+  const hashes = {}; for (const e of evidence) hashes[e.filename] = e.sha256;
+  const terminal = new Set(['PASS', 'FAIL', 'PARTIAL', 'BLOCKED']);
+  return {
+    schema: 'discovery-audit-report/v1',
+    executionMetadata: {
+      runId, ipRunId: governance.ipRunId, baseUrl: status.baseUrl || null, status: status.status,
+      startedAt: status.startedAt || null, completedAt: status.completedAt || null, durationS: status.elapsedS ?? null,
+    },
+    governanceTimeline: z.timeline || [],
+    statusHistory: (z.timeline || []).filter((e) => e.stage || terminal.has(e.event)).map((e) => ({ ts: e.ts, event: e.event, result: e.result })),
+    evidenceInventory: evidence,
+    comments: z.commentLog || [],
+    metrics: z.metrics || {},
+    failures: (z.metrics && z.metrics.failures) || 0,
+    retries: (z.metrics && z.metrics.retryCount) || 0,
+    configuration: { retryPolicy: z.retryPolicy || null, project: z.project || null, release: z.release || null },
+    environment: z.environment || null,
+    tenant: z.tenant || null,
+    versions: { executionPlane: readPkgVersion(), discoveryApi: '1.0.0', checkpointSchema: 1, auditSchema: 'v1' },
+    hashes,
+    packageHash: sha256(JSON.stringify(governance)),
+    correlationIds: z.correlationIds || { discoveryRunId: runId, ipRunId: governance.ipRunId },
+    compliance: z.compliance || null,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function writeGovernancePackage(runId, status, artifacts, dir) {
+  try {
+    const evidence = buildEvidenceManifest(dir); // scan BEFORE writing the package files
+    const governance = buildGovernance(runId, status, artifacts, evidence);
+    const audit = buildAuditReport(runId, status, artifacts, evidence, governance);
+    fs.writeFileSync(path.join(dir, 'evidence.json'), JSON.stringify(evidence, null, 2));
+    fs.writeFileSync(path.join(dir, 'governance.json'), JSON.stringify(governance, null, 2));
+    fs.writeFileSync(path.join(dir, 'audit-report.json'), JSON.stringify(audit, null, 2));
+    log('info', 'governance package written', { runId, evidenceFiles: evidence.length, governanceResult: governance.governanceResult });
+    return { evidence, governance, audit };
+  } catch (e) { log('warn', 'governance package write failed', { runId, error: e.message }); return null; }
+}
+
 // Grouped enterprise final dashboard (Application / Knowledge / Automation /
-// Intelligence / Performance / Reports / Timeline / Artefacts).
-function finalDashboard(runId, status, artifacts, savedDir, timeline) {
+// Intelligence / Performance / Reports / Governance / Timeline / Artefacts).
+function finalDashboard(runId, status, artifacts, savedDir, timeline, gov) {
   const m = (artifacts && artifacts.metadata) || {};
   const intel = (artifacts && artifacts.intelligence) || {};
   const kgStats = (artifacts && artifacts.knowledgeGraph && artifacts.knowledgeGraph.stats) || {};
@@ -383,14 +478,23 @@ function finalDashboard(runId, status, artifacts, savedDir, timeline) {
 
   if (status.zephyr && status.zephyr.enabled) {
     const z = status.zephyr;
-    out(HR()); grp('Zephyr Governance');
-    kv('Discovery', C.green('PASS'));
-    kv('Zephyr', z.zephyrStatus === 'Pass' ? C.green('PASS') : C.yellow(z.zephyrStatus || '?'));
-    kv('Cycle', z.cycleKey || C.dim('(none)'));
-    kv('Execution', z.executionKey || C.dim('(none)'));
+    const gr = z.governanceResult || '?';
+    const grC = gr === 'PASS' ? C.green : gr === 'PARTIAL' ? C.yellow : C.red;
+    const ev = gov && gov.evidence ? gov.evidence.length : (z.evidence && z.evidence.count) || 0;
+    const tl = (z.timeline && z.timeline.length) || 0;
+    const durMs = z.metrics && z.metrics.governanceDurationMs;
+    out(HR()); grp('Governance');
     kv('Jira', z.story ? C.green(`Linked (${z.story})`) : C.dim('not linked'));
-    kv('Stage syncs', z.comments ?? 0);
-    kv('Evidence', z.evidence && z.evidence.uploaded ? C.green(`Uploaded (${z.evidence.count} artifacts)`) : C.dim('—'));
+    kv('Zephyr Cycle', z.cycleKey ? C.green(`Created (${z.cycleKey})`) : C.dim('(none)'));
+    kv('Execution', z.executionKey ? `${z.zephyrStatus === 'Pass' ? C.green(z.zephyrStatus) : C.yellow(z.zephyrStatus)} (${z.executionKey})` : C.dim('(none)'));
+    kv('Evidence', z.evidence && z.evidence.uploaded ? C.green(`Uploaded (${ev} files)`) : C.dim(`${ev} files`));
+    kv('Comments', z.comments ? C.green(`Updated (${z.comments})`) : C.dim('0'));
+    kv('Timeline', tl ? C.green(`Stored (${tl} events)`) : C.dim('0'));
+    kv('Compliance', z.compliance ? grC(z.compliance.result) : C.dim('?'));
+    kv('Governance', grC(gr));
+    kv('Duration', durMs != null ? `${(durMs / 1000).toFixed(1)}s` : '?');
+    if (gov) kv('Audit package', C.dim('governance.json · evidence.json · audit-report.json'));
+    if (z.compliance && z.compliance.missing.length) kv('Missing', C.yellow(z.compliance.missing.join(', ')));
   }
 
   out(HR()); grp('Reports');
@@ -423,18 +527,27 @@ async function cmdDiscover(cfg, { runId } = {}) {
   } else if (!cfg.ci) { out(`  ${C.cyan('●')} Resuming ${C.bold(runId)} — polling…`); }
 
   const status = await pollRun(cfg, runId);
-  let artifacts = null, saved = null;
+  let artifacts = null, saved = null, govPkg = null;
   if (status.status === 'completed' && cfg.download) {
     const a = await http('get', `${cfg.epUrl}/discovery/runs/${runId}/artifacts`, { retries: cfg.retries });
     if (a.status === 200) { artifacts = a.data.artifacts; saved = writeArtifacts(runId, artifacts); }
+  }
+  // Governance audit package (only when governance is enabled — else no-op).
+  if (status.zephyr && status.zephyr.enabled && saved && saved.dir) {
+    govPkg = writeGovernancePackage(runId, status, artifacts, saved.dir);
   }
   pushHistory({ runId, ipRunId: status.ipRunId, at: new Date().toISOString(), baseUrl: cfg.baseUrl, status: status.status });
   log('info', 'discovery finished', { runId, status: status.status, ipRunId: status.ipRunId });
 
   if (cfg.ci) {
-    out(JSON.stringify({ runId, ipRunId: status.ipRunId, status: status.status, metadata: artifacts && artifacts.metadata, artifactsDir: saved && saved.dir, zephyr: status.zephyr || null }));
+    out(JSON.stringify({
+      runId, ipRunId: status.ipRunId, status: status.status,
+      metadata: artifacts && artifacts.metadata, artifactsDir: saved && saved.dir,
+      zephyr: status.zephyr || null,
+      governance: govPkg ? { result: govPkg.governance.governanceResult, evidenceFiles: govPkg.evidence.length, files: ['governance.json', 'evidence.json', 'audit-report.json'] } : null,
+    }));
   } else if (status.status === 'completed') {
-    finalDashboard(runId, status, artifacts, saved && saved.dir, status.timeline);
+    finalDashboard(runId, status, artifacts, saved && saved.dir, status.timeline, govPkg);
   } else {
     out(C.red(`  x Discovery ${status.status}${status.error ? ` — ${status.error}` : ''}`));
     if (status.zephyr && status.zephyr.enabled) {
@@ -583,4 +696,4 @@ if (require.main === module) {
   main().then((code) => process.exit(code)).catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { parseArgs, resolveConfig, buildRunBody, splitArtifacts, isSafeArtifactPath, buildChecklist, currentKey, moduleFromUrl, humanBytes, artifactTree, PIPELINE, loadRc, main, http, __setHttpClient };
+module.exports = { parseArgs, resolveConfig, buildRunBody, splitArtifacts, isSafeArtifactPath, buildChecklist, currentKey, moduleFromUrl, humanBytes, artifactTree, PIPELINE, loadRc, main, http, __setHttpClient, buildEvidenceManifest, buildGovernance, buildAuditReport, writeGovernancePackage, sha256 };

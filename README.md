@@ -187,6 +187,17 @@ prints a summary. Transient failures are retried; everything is logged to
   "password": "admin123", "maxDepth": 5, "maxPages": 200, "strategy": "bfs", "domain": "hr" }
 ```
 
+### 8c. Zephyr Essential governance & audit (opt-in)
+
+With `--zephyr` (or `ZEPHYR_GOVERNANCE=true`, or a `zephyr` block in `.discoveryrc.json`),
+each Discovery run is governed by **Zephyr Essential** — a Zephyr cycle + execution is
+created, the lifecycle is mirrored as structured Jira story comments, and an immutable
+**audit package** (`governance.json`, `evidence.json` with SHA-256, `audit-report.json`)
+is written beside the artefacts so an auditor can replay the run without live Jira/Zephyr.
+Jira + Zephyr remain the authoritative ALM systems; **governance is additive and, when
+disabled, behaviour is identical.** See [`docs/GOVERNANCE-AUDIT.md`](docs/GOVERNANCE-AUDIT.md)
+and [`docs/adr/ADR-0016-governance-audit-compliance.md`](docs/adr/ADR-0016-governance-audit-compliance.md).
+
 Env vars: `DISCOVERY_URL`, `DISCOVERY_USERNAME`, `DISCOVERY_PASSWORD`, `DISCOVERY_DEPTH`,
 `DISCOVERY_PAGES`, `DISCOVERY_STRATEGY` (OAuth2 uses `CLIENT_ID`/`CLIENT_SECRET` from `.env`).
 

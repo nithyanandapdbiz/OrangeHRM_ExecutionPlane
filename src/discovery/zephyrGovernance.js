@@ -130,23 +130,55 @@ class ZephyrGovernance {
     this.evidence = { mode: 'jira-comment', uploaded: false, count: 0 };
     this.retryCount = 0;
     this.startedAt = null;
+    this.ipRunId = null;
+    // Phase 5 audit state.
+    this.timeline = [];       // structured lifecycle events (ts, elapsed, actor, stage, event, result)
+    this.commentLog = [];     // verbatim comments posted (audit trail, no live-Jira needed to replay)
+    this.compliance = null;   // { result: PASS|PARTIAL, required, present, missing, warnings }
+    this.governanceResult = 'PASS';
+    this.metrics = {
+      cycleCreateMs: null, executionCreateMs: null, commentMs: 0, commentCount: 0,
+      evidenceUploadMs: null, retryCount: 0, failures: 0, skipped: 0, governanceDurationMs: null,
+    };
   }
 
-  /** Serialisable view surfaced to the execution store / CLI dashboard. */
+  /** Serialisable governance package surfaced to the execution store / CLI. */
   snapshot() {
     return {
       enabled: true,
       project: this.cfg.project || null,
+      tenant: this.cfg.tenant || null,
+      environment: this.cfg.environment || null,
+      release: this.cfg.release || null,
       story: this.storyOk ? this.story : null,
       cycleKey: this.cycleKey || null,
       cycleName: this.cycleName || null,
       executionKey: this.executionKey || null,
       zephyrStatus: this.zephyrStatus,
+      governanceResult: this.governanceResult,
       comments: this.comments,
+      commentLog: this.commentLog,
+      timeline: this.timeline,
+      compliance: this.compliance,
+      metrics: { ...this.metrics, retryCount: this.retryCount },
       evidence: { ...this.evidence },
       retryCount: this.retryCount,
       retryPolicy: this.cfg.retryPolicy,
+      correlationIds: { discoveryRunId: this.discoveryRunId || null, ipRunId: this.ipRunId || null },
     };
+  }
+
+  // Record a structured, timestamped lifecycle event (Phase 1 timeline).
+  _event(stage, event, result = 'ok') {
+    const ts = this._now();
+    this.timeline.push({
+      ts: new Date(ts).toISOString(),
+      elapsedMs: this.startedAt ? ts - this.startedAt : 0,
+      actor: this.cfg.actor || 'discovery-platform',
+      stage: stage || null,
+      event,
+      result,
+    });
   }
 
   // ── Lifecycle: Discovery Requested → Create Cycle → Create Execution ─────────
@@ -155,6 +187,7 @@ class ZephyrGovernance {
     this.baseUrl = baseUrl;
     this.startedAt = this._now();
     const browserLabel = browser || this.cfg.browser;
+    this._event(null, 'Discovery Requested');
 
     // Resolve the linked Jira story (also caches its numeric id for Zephyr links).
     if (this.story) {
@@ -163,14 +196,22 @@ class ZephyrGovernance {
         if (s && s.key) { this.story = s.key; this.storyOk = true; }
       } catch (e) { logger.warn(`[zephyr-gov] story ${this.story} unresolved: ${e.message}`); }
     }
+    if (this.storyOk) this._event('jira', 'Jira Story Linked');
 
     // Create (or reuse) the Zephyr cycle.
     if (this.cfg.autoCreateCycle && !this.cycleKey && this.alm.zephyrEnabled) {
+      const t0 = this._now();
       try {
         const cyc = await this.alm.createTestRun(`Discovery ${shortHost(baseUrl)}`, []);
         this.cycleKey = (cyc && (cyc.key || cyc.id)) || null;
         this.cycleName = (cyc && cyc.name) || null;
-      } catch (e) { logger.warn(`[zephyr-gov] cycle create failed: ${e.message}`); }
+        this.metrics.cycleCreateMs = this._now() - t0;
+        if (this.cycleKey) this._event('cycle', 'Zephyr Cycle Created');
+      } catch (e) { this.metrics.failures += 1; logger.warn(`[zephyr-gov] cycle create failed: ${e.message}`); }
+    } else if (this.cycleKey) {
+      this._event('cycle', 'Zephyr Cycle Reused');
+    } else {
+      this.metrics.skipped += 1;
     }
 
     this.zephyrStatus = mapStatus('running');
@@ -194,7 +235,8 @@ class ZephyrGovernance {
     const t = this.startedAt ? Math.round((this._now() - this.startedAt) / 1000) : 0;
     this.stages.push({ t, stage, detail: detail || null, label });
     this.zephyrStatus = mapStatus(discoveryStatus);
-    if (this.cfg.autoSyncStatus) await this._comment(`▸ ${label}  ·  Zephyr: ${this.zephyrStatus}`);
+    this._event(stage, label);
+    if (this.cfg.autoSyncStatus) await this._comment(`▸ ${label}  ·  Zephyr: ${this.zephyrStatus}`, { stage });
     return this.snapshot();
   }
 
@@ -212,7 +254,9 @@ class ZephyrGovernance {
   /** Record a retry per the configured policy (audit history via comment). */
   async retry({ reason, previousExecution } = {}) {
     this.retryCount += 1;
+    this.metrics.retryCount = this.retryCount;
     if (this.cfg.retryPolicy === 'new-execution') this.executionKey = null;
+    this._event(null, `Retry #${this.retryCount}`, 'retry');
     await this._comment(`🔁 *Retry #${this.retryCount}* (${this.cfg.retryPolicy})\n${kvBlock([
       ['Reason', reason || 'unspecified'],
       ['Previous execution', previousExecution || this.executionKey || '(none)'],
@@ -222,10 +266,18 @@ class ZephyrGovernance {
 
   async _finish(discoveryStatus, { metadata = {}, artifactFiles = [], error, ipRunId } = {}) {
     this.zephyrStatus = mapStatus(discoveryStatus);
+    this.ipRunId = ipRunId || this.ipRunId;
     const durationMs = this.startedAt ? this._now() - this.startedAt : 0;
+
+    // Phase 8 — compliance: are all required artefacts present? Missing → PARTIAL
+    // (never fails Discovery). A failed run is governance-FAIL regardless.
+    this.compliance = computeCompliance(metadata, artifactFiles);
+    this.governanceResult = discoveryStatus === 'completed' ? this.compliance.result : 'FAIL';
+    if (this.compliance.missing.length) logger.warn(`[zephyr-gov] compliance PARTIAL — missing: ${this.compliance.missing.join(', ')}`);
 
     // 1 — Authoritative Zephyr execution: final status + full timeline/metrics comment.
     if (this.cfg.autoCreateExecution && this.cycleKey && this.alm.zephyrEnabled) {
+      const t0 = this._now();
       try {
         const caseKey = await this._ensureExecutionCase();
         if (caseKey) {
@@ -239,16 +291,28 @@ class ZephyrGovernance {
             comment: this._executionComment(discoveryStatus, metadata, error, durationMs, ipRunId),
           }]);
           this.executionKey = (res && res.executions && res.executions[0]) || caseKey;
+          this.metrics.executionCreateMs = this._now() - t0;
+          this._event('execution', 'Zephyr Execution Created');
           await this.alm.completeTestRun(this.cycleKey).catch(() => {});
         }
-      } catch (e) { logger.warn(`[zephyr-gov] execution sync failed: ${e.message}`); }
+      } catch (e) { this.metrics.failures += 1; logger.warn(`[zephyr-gov] execution sync failed: ${e.message}`); }
+    } else {
+      this.metrics.skipped += 1;
     }
 
-    // 2 — Evidence + metadata + final result as a Jira comment (attachment fallback).
+    // 2 — Evidence + metadata + final result as a structured Markdown Jira comment.
     if (this.cfg.autoUploadArtifacts) {
+      const t0 = this._now();
       const posted = await this._comment(this._evidenceComment(discoveryStatus, metadata, artifactFiles, error, durationMs));
+      this.metrics.evidenceUploadMs = this._now() - t0;
       this.evidence = { mode: 'jira-comment', uploaded: posted, count: (artifactFiles || []).length };
+      if (posted) this._event(null, 'Evidence Uploaded');
     }
+
+    // Terminal timeline marker + governance duration.
+    this._event(null, discoveryStatus === 'completed' ? (this.governanceResult === 'PARTIAL' ? 'PARTIAL' : 'PASS') : this.zephyrStatus.toUpperCase(),
+      discoveryStatus === 'completed' ? 'ok' : 'fail');
+    this.metrics.governanceDurationMs = this.startedAt ? this._now() - this.startedAt : 0;
     return this.snapshot();
   }
 
@@ -273,11 +337,33 @@ class ZephyrGovernance {
     }
   }
 
-  async _comment(text) {
+  async _comment(text, { stage } = {}) {
     if (!this.storyOk || !this.story || !text) return false;
+    const t0 = this._now();
     const r = await this.alm.addComment(this.story, text);
-    if (r && r.ok) { this.comments += 1; return true; }
+    this.metrics.commentMs += this._now() - t0;
+    if (r && r.ok) {
+      this.comments += 1;
+      this.metrics.commentCount += 1;
+      this.commentLog.push({ ts: new Date(t0).toISOString(), stage: stage || null, text });
+      return true;
+    }
+    this.metrics.failures += 1;
     return false;
+  }
+
+  // Per-stage durations table (Markdown) derived from the structured timeline.
+  _stageTable() {
+    const rows = [];
+    for (let i = 0; i < this.timeline.length; i++) {
+      const e = this.timeline[i];
+      if (!e.stage || e.stage === 'jira') continue;
+      const next = this.timeline[i + 1];
+      const durMs = next ? Date.parse(next.ts) - Date.parse(e.ts) : 0;
+      rows.push(`| ${e.event} | ${e.result === 'ok' ? '✅' : '⚠️'} | ${fmtDur(durMs)} |`);
+    }
+    if (!rows.length) return '';
+    return ['| Stage | Status | Duration |', '|---|:--:|---:|', ...rows].join('\n');
   }
 
   _metricsLines(metadata = {}) {
@@ -320,24 +406,75 @@ class ZephyrGovernance {
     return body.slice(0, 2000);
   }
 
+  // Phase 4 — structured Markdown final comment (stage table + Discovery summary).
   _evidenceComment(discoveryStatus, metadata, artifactFiles, error, durationMs) {
+    const m = metadata || {};
     const files = (artifactFiles || []).slice(0, 40);
-    const evidence = files.length ? files.map((f) => `• ${f}`).join('\n') : '• (none)';
+    const evidence = files.length ? files.map((f) => `- ${f}`).join('\n') : '- (none)';
+    const table = this._stageTable();
+    const header = discoveryStatus === 'completed'
+      ? `## ✅ Discovery Execution — ${this.governanceResult}`
+      : `## ❌ Discovery Execution — ${discoveryStatus.toUpperCase()}`;
     return [
-      discoveryStatus === 'completed'
-        ? '✅ *Discovery execution completed*'
-        : `❌ *Discovery execution ${discoveryStatus}*`,
+      header,
       kvBlock([
         ['Zephyr Status', this.zephyrStatus],
+        ['Governance', this.governanceResult],
         ['Zephyr Cycle', this.cycleKey || '(none)'],
         ['Zephyr Execution', this.executionKey || '(none)'],
         ['Duration', `${(durationMs / 1000).toFixed(1)}s`],
       ]),
-      this._metricsLines(metadata) && `*Metrics*\n${this._metricsLines(metadata)}`,
-      `*Evidence / Artifacts* (linked — Zephyr attachment API limited)\n${evidence}`,
-      error && `*Error*\n${error}`,
+      table && `### Stage Timeline\n${table}`,
+      `### Discovery Summary\n${kvBlock([
+        ['Coverage', m.coverage != null ? `${m.coverage}%` : undefined],
+        ['Risk', m.riskSeverity],
+        ['Knowledge Graph', m.knowledgeGraphNodes != null ? `${m.knowledgeGraphNodes} nodes / ${m.knowledgeGraphEdges ?? '?'} edges` : undefined],
+        ['Workflows', m.workflows],
+        ['Business Rules', m.businessRules],
+        ['Recommendations', m.recommendations],
+      ])}`,
+      this.compliance && this.compliance.missing.length ? `### ⚠️ Compliance PARTIAL\nMissing: ${this.compliance.missing.join(', ')}` : '',
+      `### Evidence (${files.length}) — linked; Zephyr attachment API limited\n${evidence}`,
+      error && `### Error\n${error}`,
     ].filter(Boolean).join('\n\n');
   }
+}
+
+// ── Compliance (Phase 8) ───────────────────────────────────────────────────────
+// Verify every required artefact is present. Missing → PARTIAL (never fails the run).
+function computeCompliance(metadata = {}, files = []) {
+  const m = metadata || {};
+  const has = (name) => files.includes(name) || files.some((f) => String(f).startsWith(name));
+  const checks = [
+    ['Executive Report', has('reports/executive.json')],
+    ['Architect Report', has('reports/architect.json')],
+    ['QA Report', has('reports/qa.json')],
+    ['Developer Report', has('reports/developer.json')],
+    ['Discovery HTML', has('report.html')],
+    ['Knowledge Graph', has('knowledge-graph.json') || (m.knowledgeGraphNodes || 0) > 0],
+    ['Navigation Graph', has('navigation-graph.json')],
+    ['Coverage', has('coverage.json') || m.coverage != null],
+    ['Risk', has('risk.json') || !!m.riskSeverity],
+    ['Business Rules', has('business-rules.json') || (m.businessRules || 0) > 0],
+    ['Recommendations', has('recommendations.json') || (m.recommendations || 0) > 0],
+    ['POMs', has('page-objects/') || (m.pageObjects || 0) > 0],
+    ['Contracts', has('contracts.json') || (m.contracts || 0) > 0],
+    ['Contract Tests', has('contract-tests/') || (m.contractTests || 0) > 0],
+  ];
+  const missing = checks.filter(([, ok]) => !ok).map(([n]) => n);
+  return {
+    result: missing.length ? 'PARTIAL' : 'PASS',
+    required: checks.map(([n]) => n),
+    present: checks.filter(([, ok]) => ok).map(([n]) => n),
+    missing,
+    warnings: missing.map((n) => `Required artifact missing: ${n}`),
+  };
+}
+
+function fmtDur(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
 }
 
 /**
@@ -355,7 +492,9 @@ module.exports = {
   ZephyrGovernance,
   governanceFor,
   resolveGovernanceConfig,
+  computeCompliance,
   mapStatus,
   stageLabel,
+  fmtDur,
   STATUS_MAP,
 };
