@@ -22,7 +22,8 @@
     "lint:all": "eslint . --ext .js",
     "lint:fix": "eslint server.js routes clients runners lib middleware test --ext .js --fix",
     "format": "prettier --write \"{server.js,routes,clients,runners,lib,middleware,config}/**/*.js\" server.js",
-    "health": "node -e \"require('http').get('http://localhost:3000/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>console.log(JSON.stringify(JSON.parse(d),null,2)))})\""
+    "health": "node -e \"require('http').get('http://localhost:3000/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>console.log(JSON.stringify(JSON.parse(d),null,2)))})\"",
+    "discover": "node scripts/discover.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

@@ -1,0 +1,10 @@
+{
+  "baseUrl": "https://opensource-demo.orangehrmlive.com",
+  "username": "Admin",
+  "password": "admin123",
+  "maxDepth": 5,
+  "maxPages": 200,
+  "strategy": "bfs",
+  "headless": true,
+  "domain": "hr"
+}
